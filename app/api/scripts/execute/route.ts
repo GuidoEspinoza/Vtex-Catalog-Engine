@@ -6,6 +6,8 @@ import os from 'os';
 import { supabaseAdmin } from '@/lib/supabase';
 
 
+export const maxDuration = 300; // Permitir hasta 5 minutos de streaming en Vercel Pro/Services
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -61,7 +63,42 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Guardar archivo temporalmente en disco
+    // 2. Si PYTHON_SERVICE_URL está disponible (Vercel Services), delegar al microservicio Python
+    const pythonServiceUrl = process.env.PYTHON_SERVICE_URL;
+    if (pythonServiceUrl) {
+      const outgoing = new FormData();
+      outgoing.append('file', file, file.name);
+      outgoing.append('entity', entity);
+      outgoing.append('account', account.account_name);
+      outgoing.append('app_key', account.app_key);
+      outgoing.append('app_token', account.app_token);
+      outgoing.append('environment', account.environment || 'vtexcommercestable');
+      outgoing.append('dry_run', isDryRun ? 'true' : 'false');
+
+      const serviceRes = await fetch(`${pythonServiceUrl.replace(/\/$/, '')}/execute`, {
+        method: 'POST',
+        body: outgoing,
+      });
+
+      if (!serviceRes.ok) {
+        const errText = await serviceRes.text();
+        return new Response(JSON.stringify({ error: `Fallo en microservicio Python (${serviceRes.status}): ${errText}` }), {
+          status: serviceRes.status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(serviceRes.body, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        },
+      });
+    }
+
+    // 3. Fallback Local (Desarrollo): Guardar archivo temporal y ejecutar con child_process.spawn
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
     const tempDir = os.tmpdir();
@@ -69,7 +106,7 @@ export async function POST(req: NextRequest) {
     const tempFilePath = path.join(tempDir, `vtex_${Date.now()}_${safeFileName}`);
     fs.writeFileSync(tempFilePath, buffer);
 
-    // 3. Crear ReadableStream para SSE
+    // 4. Crear ReadableStream para SSE
     let pythonProcess: any = null;
 
     const stream = new ReadableStream({

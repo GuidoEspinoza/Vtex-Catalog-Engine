@@ -7,6 +7,8 @@ import os from 'os';
 
 const execFileAsync = promisify(execFile);
 
+export const maxDuration = 60;
+
 // Modelos verificados en orden de prioridad
 const GEMINI_MODELS = [
   'gemini-flash-lite-latest',
@@ -68,16 +70,38 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `Extensión '${fileExt}' no permitida. Usa .xlsx, .xls o .csv.` }, { status: 400 });
       }
 
-      // Guardar archivo temporal para que pandas extraiga con exactitud las columnas
-      const bytes = await file.arrayBuffer();
-      const buffer = Buffer.from(bytes);
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      tempFilePath = path.join(os.tmpdir(), `ai_eval_${Date.now()}_${safeName}`);
-      fs.writeFileSync(tempFilePath, buffer);
+      // Si PYTHON_SERVICE_URL está presente (Vercel Services), delegar la extracción al servicio Python
+      const pythonServiceUrl = process.env.PYTHON_SERVICE_URL;
+      if (pythonServiceUrl) {
+        try {
+          const outgoing = new FormData();
+          outgoing.append('file', file, file.name);
+          const extRes = await fetch(`${pythonServiceUrl.replace(/\/$/, '')}/extract`, {
+            method: 'POST',
+            body: outgoing,
+          });
+          if (extRes.ok) {
+            const extData = await extRes.json();
+            headers = extData.headers || [];
+            sampleRows = extData.sample || [];
+          }
+        } catch (e) {
+          console.warn('Fallo al extraer vía microservicio Python, intentando fallback local:', e);
+        }
+      }
 
-      const extracted = await extractHeadersAndSample(tempFilePath);
-      headers = extracted.headers;
-      sampleRows = extracted.sample;
+      // Fallback local: guardar archivo temporal para que pandas extraiga con exactitud las columnas
+      if (headers.length === 0) {
+        const bytes = await file.arrayBuffer();
+        const buffer = Buffer.from(bytes);
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        tempFilePath = path.join(os.tmpdir(), `ai_eval_${Date.now()}_${safeName}`);
+        fs.writeFileSync(tempFilePath, buffer);
+
+        const extracted = await extractHeadersAndSample(tempFilePath);
+        headers = extracted.headers;
+        sampleRows = extracted.sample;
+      }
     } else {
       const body = await req.json();
       entity = body.entity || 'categories';
