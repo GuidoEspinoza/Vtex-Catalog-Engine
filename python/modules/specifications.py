@@ -92,29 +92,29 @@ def get_or_create_group(client: VtexClient, category_id: Optional[int], group_na
     if cache_key in cache:
         return cache[cache_key]
 
-    # Consultar si ya existe
-    if cat_payload:
-        list_url = f"/api/catalog_system/pvt/specification/groupbycategory/{cat_payload}"
-        try:
-            res = client.get(list_url)
-            if res.status_code == 200:
-                groups = res.json()
-                if isinstance(groups, list):
-                    for g in groups:
-                        g_name = (g.get("Name") or g.get("name") or "").strip().lower()
-                        if g_name == group_name.strip().lower():
-                            g_id = int(g.get("Id") or g.get("id"))
-                            cache[cache_key] = g_id
-                            return g_id
-        except Exception:
-            pass
+    # Consultar si ya existe en la categoría o a nivel global (categoría 0)
+    cat_query_id = cat_payload if cat_payload is not None else 0
+    list_url = f"/api/catalog_system/pvt/specification/groupbycategory/{cat_query_id}"
+    try:
+        res = client.get(list_url)
+        if res.status_code == 200:
+            groups = res.json()
+            if isinstance(groups, list):
+                for g in groups:
+                    g_name = (g.get("Name") or g.get("name") or "").strip().lower()
+                    if g_name == group_name.strip().lower():
+                        g_id = int(g.get("Id") or g.get("id"))
+                        cache[cache_key] = g_id
+                        return g_id
+    except Exception:
+        pass
 
     if dry_run:
         dummy_id = 99999
         cache[cache_key] = dummy_id
         return dummy_id
 
-    # Crear grupo
+    # Si no existe, crear grupo
     create_url = "/api/catalog/pvt/specificationgroup"
     payload = {"CategoryId": cat_payload, "Name": group_name.strip()}
     res = client.post(create_url, json=payload)
@@ -128,7 +128,7 @@ def get_or_create_group(client: VtexClient, category_id: Optional[int], group_na
     return None
 
 def get_existing_fields_for_category(client: VtexClient, category_id: Optional[int], cache: dict) -> Dict[str, dict]:
-    """Obtiene campos existentes indexados por nombre en minúsculas."""
+    """Obtiene campos existentes indexados por nombre normalizado."""
     cat_key = category_id if category_id and category_id > 0 else 0
     if cat_key in cache:
         return cache[cat_key]
@@ -213,11 +213,6 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
                 except (ValueError, TypeError):
                     cat_id = None
 
-            group_id = get_or_create_group(client, cat_id, group_name, group_cache, dry_run)
-            if not group_id and not dry_run:
-                error_count += 1
-                continue
-
             field_type = map_field_type(row[field_type_col]) if field_type_col else 1
             field_type_name = VTEX_FIELD_TYPE_NAMES.get(field_type, f"Tipo {field_type}")
             is_sku = parse_sku_bool(row[stockkeeping_col]) if stockkeeping_col else False
@@ -227,14 +222,14 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
 
             field_desc = f"'{field_name}' [Cat: {cat_id or 0}, Grupo: {group_name}]"
 
-            # Verificar si el campo ya existe en esta categoría
+            # 1. Verificar primero si el campo ya existe en esta categoría
             existing_fields = get_existing_fields_for_category(client, cat_id, category_fields_cache)
             norm_name = normalize_text(field_name)
             existing_field = existing_fields.get(norm_name)
 
             if existing_field:
                 existing_id = existing_field.get("FieldId")
-                # Obtener detalle completo si no lo tenemos
+                # Obtener detalle completo si no lo tenemos en caché
                 if existing_id not in field_detail_cache:
                     det_res = client.get(f"/api/catalog_system/pub/specification/fieldGet/{existing_id}")
                     if det_res.status_code == 200:
@@ -247,8 +242,21 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
                 existing_type_name = VTEX_FIELD_TYPE_NAMES.get(existing_type_id, full_det.get("FieldTypeName", "Desconocido"))
 
                 if existing_type_id == field_type:
-                    emit_progress(row_num, total_rows, field_desc, f"-> ℹ️ Ya existe (FieldId: {existing_id}, Tipo: {existing_type_name})")
-                    updated_count += 1
+                    if dry_run:
+                        emit_progress(row_num, total_rows, field_desc, f"-> [DRY-RUN] Ya existe (FieldId: {existing_id}, Tipo: {existing_type_name}) - Sin duplicar")
+                        updated_count += 1
+                    else:
+                        update_payload = dict(full_det)
+                        update_payload["Description"] = str(row[description_col]).strip() if description_col and pd.notna(row[description_col]) else full_det.get("Description", field_name)
+                        update_payload["IsRequired"] = is_required
+                        update_payload["IsFilter"] = is_filter
+                        update_payload["IsActive"] = is_active
+                        update_res = client.put("/api/catalog_system/pvt/specification/field", json=update_payload)
+                        if update_res.status_code in [200, 201]:
+                            emit_progress(row_num, total_rows, field_desc, f"-> 🔄 Actualizado (FieldId: {existing_id}, Tipo: {existing_type_name})")
+                        else:
+                            emit_progress(row_num, total_rows, field_desc, f"-> ℹ️ Ya existe (FieldId: {existing_id}, Tipo: {existing_type_name})")
+                        updated_count += 1
                 else:
                     emit_log(
                         "warning",
@@ -258,6 +266,12 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
                     )
                     skipped_count += 1
                 time.sleep(0.05)
+                continue
+
+            # 2. Si el campo NO existe, asegurar la existencia del grupo antes de crearlo
+            group_id = get_or_create_group(client, cat_id, group_name, group_cache, dry_run)
+            if not group_id and not dry_run:
+                error_count += 1
                 continue
 
             payload = {
