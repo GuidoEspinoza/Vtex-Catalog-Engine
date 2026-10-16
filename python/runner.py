@@ -20,17 +20,19 @@ from modules.specifications import process_specifications
 from modules.spec_values import process_spec_values
 from modules.product_specs import process_product_specs
 from modules.collections import process_collections
+from modules.pricing_cleanup import process_pricing_cleanup
 
 def main():
     parser = argparse.ArgumentParser(description="VTEX Catalog Engine Master Runner")
     parser.add_argument("--entity", required=True, choices=[
-        "categories", "brands", "specifications", "spec_values", "product_specs", "collections"
+        "categories", "brands", "specifications", "spec_values", "product_specs", "collections", "pricing_cleanup"
     ])
     parser.add_argument("--account", required=True, help="Nombre de cuenta VTEX")
     parser.add_argument("--app-key", required=True, help="X-VTEX-API-AppKey")
     parser.add_argument("--app-token", required=True, help="X-VTEX-API-AppToken")
     parser.add_argument("--environment", default="vtexcommercestable", help="Ambiente VTEX")
-    parser.add_argument("--file", required=True, help="Ruta al archivo XLSX o CSV")
+    parser.add_argument("--file", required=False, default=None, help="Ruta al archivo XLSX o CSV (opcional para pricing_cleanup)")
+    parser.add_argument("--tables", required=False, default=None, help="Tablas de precios separadas por coma (ej. cyber,organizacion)")
     parser.add_argument("--dry-run", action="store_true", default=False, help="Ejecutar en modo simulación sin mutar datos")
 
     args = parser.parse_args()
@@ -50,6 +52,26 @@ def main():
         )
     except Exception as e:
         emit_log("error", f"Fallo al instanciar cliente VTEX: {str(e)}")
+        sys.exit(1)
+
+    if args.entity == "pricing_cleanup":
+        target_tables = [t.strip() for t in args.tables.split(",") if t.strip()] if args.tables else []
+        try:
+            process_pricing_cleanup(
+                client=client,
+                target_tables=target_tables,
+                file_path=args.file,
+                dry_run=args.dry_run
+            )
+            emit_log("success", f"Completado exitosamente: {args.entity} ({mode_label})")
+            sys.exit(0)
+        except Exception as e:
+            emit_log("error", f"Excepción fatal en pricing_cleanup: {str(e)}")
+            sys.exit(1)
+
+    # Validar que otras entidades requieran archivo
+    if not args.file:
+        emit_log("error", f"La entidad '{args.entity}' requiere el parámetro --file.")
         sys.exit(1)
 
     # Despachar al módulo correspondiente

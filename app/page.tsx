@@ -22,8 +22,10 @@ import {
   PackageCheck,
   FolderArchive,
   Info,
+  Trash2,
 } from 'lucide-react';
 import { VtexAccount } from '@/types/database';
+import PriceCleanupModal from '@/components/PriceCleanupModal';
 
 interface LogEntry {
   id: string;
@@ -59,6 +61,7 @@ export default function CatalogEngineDashboard() {
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [showNewAccountModal, setShowNewAccountModal] = useState(false);
+  const [showPriceCleanupModal, setShowPriceCleanupModal] = useState(false);
 
   // Formulario nueva cuenta
   const [newAccount, setNewAccount] = useState({
@@ -339,10 +342,20 @@ export default function CatalogEngineDashboard() {
             </button>
           </div>
 
+          {/* Price Cleanup Button */}
+          <button
+            onClick={() => setShowPriceCleanupModal(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-rose-500/40 bg-rose-950/20 text-rose-300 hover:bg-rose-900/30 hover:border-rose-500/60 transition-all text-xs font-semibold shadow-sm cursor-pointer"
+            title="Limpieza de listas de precios (Full Clean Up)"
+          >
+            <Trash2 className="h-3.5 w-3.5 text-rose-400" />
+            <span className="hidden sm:inline">Limpieza de Precios</span>
+          </button>
+
           {/* Logout */}
           <button
             onClick={handleLogout}
-            className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 rounded-xl border border-slate-800 transition-colors"
+            className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 rounded-xl border border-slate-800 transition-colors cursor-pointer"
             title="Cerrar sesión"
           >
             <LogOut className="h-4 w-4" />
@@ -748,6 +761,13 @@ export default function CatalogEngineDashboard() {
           </div>
         </div>
       )}
+
+      {/* Price Cleanup Modal */}
+      <PriceCleanupModal
+        isOpen={showPriceCleanupModal}
+        onClose={() => setShowPriceCleanupModal(false)}
+        selectedAccount={selectedAccountObj}
+      />
     </div>
   );
 }

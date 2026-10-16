@@ -8,6 +8,7 @@ const PUBLIC_PATHS = [
   '/_next',
   '/favicon.ico',
   '/robots.txt',
+  '/templates',
 ];
 
 export function proxy(request: NextRequest) {
