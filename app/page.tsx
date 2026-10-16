@@ -23,6 +23,7 @@ import {
   FolderArchive,
   Info,
   Trash2,
+  Download,
 } from 'lucide-react';
 import { VtexAccount } from '@/types/database';
 import PriceCleanupModal from '@/components/PriceCleanupModal';
@@ -45,12 +46,54 @@ interface GeminiAnalysis {
 }
 
 const ENTITIES = [
-  { id: 'categories', label: 'Árbol de Categorías', icon: FolderTree, desc: 'Departamentos, categorías y subcategorías' },
-  { id: 'brands', label: 'Marcas', icon: Tag, desc: 'Catálogo de marcas y metadatos SEO' },
-  { id: 'specifications', label: 'Campos y Grupos', icon: Sliders, desc: 'Especificaciones de Producto y SKU' },
-  { id: 'spec_values', label: 'Valores de Atributos', icon: ListPlus, desc: 'Opciones predefinidas de combos/radios' },
-  { id: 'product_specs', label: 'Asignación a Productos', icon: PackageCheck, desc: 'Valores asignados a IDs de producto' },
-  { id: 'collections', label: 'Colecciones', icon: FolderArchive, desc: 'Colecciones dinámicas y subcolecciones' },
+  {
+    id: 'categories',
+    label: 'Árbol de Categorías',
+    icon: FolderTree,
+    desc: 'Departamentos, categorías y subcategorías',
+    templateUrl: '/templates/Planilla_de_Categorias.xlsx',
+    templateName: 'Planilla_de_Categorias.xlsx',
+  },
+  {
+    id: 'brands',
+    label: 'Marcas',
+    icon: Tag,
+    desc: 'Catálogo de marcas y metadatos SEO',
+    templateUrl: '/templates/Planilla_de_Marcas.xlsx',
+    templateName: 'Planilla_de_Marcas.xlsx',
+  },
+  {
+    id: 'specifications',
+    label: 'Campos y Grupos',
+    icon: Sliders,
+    desc: 'Especificaciones de Producto y SKU',
+    templateUrl: '/templates/Planilla_de_Especificaciones.xlsx',
+    templateName: 'Planilla_de_Especificaciones.xlsx',
+  },
+  {
+    id: 'spec_values',
+    label: 'Valores de Atributos',
+    icon: ListPlus,
+    desc: 'Opciones predefinidas de combos/radios',
+    templateUrl: '/templates/Planilla_de_Opciones_Especificaciones.xlsx',
+    templateName: 'Planilla_de_Opciones_Especificaciones.xlsx',
+  },
+  {
+    id: 'product_specs',
+    label: 'Asignación a Productos',
+    icon: PackageCheck,
+    desc: 'Valores asignados a IDs de producto',
+    templateUrl: '/templates/Planilla_de_Asignacion_Atributos_Productos.xlsx',
+    templateName: 'Planilla_de_Asignacion_Atributos_Productos.xlsx',
+  },
+  {
+    id: 'collections',
+    label: 'Colecciones',
+    icon: FolderArchive,
+    desc: 'Colecciones dinámicas y subcolecciones',
+    templateUrl: '/templates/Planilla_de_Colecciones.xlsx',
+    templateName: 'Planilla_de_Colecciones.xlsx',
+  },
 ];
 
 export default function CatalogEngineDashboard() {
@@ -388,15 +431,26 @@ export default function CatalogEngineDashboard() {
                       setIsDryRunPassed(false);
                       setAiAnalysis(null);
                     }}
-                    className={`text-left p-3.5 rounded-xl border transition-all cursor-pointer ${
+                    className={`text-left p-3.5 rounded-xl border transition-all cursor-pointer relative group ${
                       isSelected
                         ? 'bg-pink-950/30 border-pink-500/80 text-pink-200 shadow-md shadow-pink-950/20'
                         : 'bg-slate-950/40 border-slate-800/80 hover:bg-slate-800/40 text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    <div className="flex items-center gap-2.5 font-medium text-sm mb-1">
-                      <Icon className={`h-4 w-4 ${isSelected ? 'text-pink-400' : 'text-slate-500'}`} />
-                      <span>{ent.label}</span>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2 font-medium text-sm">
+                        <Icon className={`h-4 w-4 ${isSelected ? 'text-pink-400' : 'text-slate-500'}`} />
+                        <span>{ent.label}</span>
+                      </div>
+                      <a
+                        href={ent.templateUrl}
+                        download={ent.templateName}
+                        onClick={(e) => e.stopPropagation()}
+                        className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-pink-400 hover:bg-slate-800/80 rounded transition-all"
+                        title={`Descargar template de ${ent.label}`}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                      </a>
                     </div>
                     <p className="text-[11px] text-slate-500 line-clamp-1">{ent.desc}</p>
                   </button>
@@ -407,19 +461,36 @@ export default function CatalogEngineDashboard() {
 
           {/* 2. Carga de Archivo (Dropzone) */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
                 <FileSpreadsheet className="h-4 w-4 text-pink-500" />
                 2. Planilla de Datos (Excel / CSV)
               </h2>
-              {selectedFile && (
-                <button
-                  onClick={() => setSelectedFile(null)}
-                  className="text-xs text-slate-500 hover:text-slate-300"
-                >
-                  Quitar
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {(() => {
+                  const currentEntity = ENTITIES.find((e) => e.id === selectedEntity) || ENTITIES[0];
+                  return (
+                    <a
+                      href={currentEntity.templateUrl}
+                      download={currentEntity.templateName}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-pink-950/40 hover:bg-pink-900/60 text-pink-300 border border-pink-800/60 hover:border-pink-500/80 transition-all shadow-sm cursor-pointer"
+                      title={`Descargar planilla template para ${currentEntity.label}`}
+                    >
+                      <Download className="h-3.5 w-3.5 text-pink-400" />
+                      <span className="hidden sm:inline">Descargar Template</span>
+                      <span className="sm:hidden">Template</span>
+                    </a>
+                  );
+                })()}
+                {selectedFile && (
+                  <button
+                    onClick={() => setSelectedFile(null)}
+                    className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1"
+                  >
+                    Quitar
+                  </button>
+                )}
+              </div>
             </div>
 
             <div

@@ -56,6 +56,35 @@ def process_categories(client: VtexClient, file_path: str, dry_run: bool = False
 
         endpoint = "/api/catalog/pvt/category"
 
+        category_cache = {}
+
+        # Pre-cargar árbol de categorías en 1 sola llamada rápida para evitar cientos de llamadas HTTP
+        try:
+            tree_res = client.get("/api/catalog_system/pub/category/tree/10")
+            if tree_res.status_code == 200:
+                def harvest_ids(nodes):
+                    for n in nodes:
+                        if "id" in n:
+                            category_cache[int(n["id"])] = True
+                        if "children" in n and n["children"]:
+                            harvest_ids(n["children"])
+                tree_data = tree_res.json()
+                if isinstance(tree_data, list):
+                    harvest_ids(tree_data)
+        except Exception:
+            pass
+
+        def check_category_exists(cid: int) -> bool:
+            if cid in category_cache:
+                return category_cache[cid]
+            try:
+                res = client.get(f"/api/catalog/pvt/category/{cid}")
+                exists = res.status_code in [200, 204]
+                category_cache[cid] = exists
+                return exists
+            except Exception:
+                return False
+
         for idx, row in df.iterrows():
             row_num = idx + 1
             cat_name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
@@ -124,15 +153,13 @@ def process_categories(client: VtexClient, file_path: str, dry_run: bool = False
                 
                 # Validar existencia de categoría padre si está especificada
                 if father_id:
-                    check_father = client.get(f"/api/catalog/pvt/category/{father_id}")
-                    if check_father.status_code not in [200, 204]:
-                        emit_log("warning", f"Fila #{row_num}: Padre ID {father_id} no encontrado en VTEX (HTTP {check_father.status_code}).")
+                    if not check_category_exists(father_id):
+                        emit_log("warning", f"Fila #{row_num}: Padre ID {father_id} no encontrado en VTEX.")
                         valid = False
 
                 # Validar si ya existe la categoría
                 if cat_id:
-                    check_cat = client.get(f"/api/catalog/pvt/category/{cat_id}")
-                    if check_cat.status_code in [200, 204]:
+                    if check_category_exists(cat_id):
                         emit_progress(row_num, total_rows, cat_desc, "-> [DRY-RUN] Existente (se actualizará)")
                         updated_count += 1
                     else:
@@ -141,6 +168,7 @@ def process_categories(client: VtexClient, file_path: str, dry_run: bool = False
                 else:
                     emit_progress(row_num, total_rows, cat_desc, "-> [DRY-RUN] Válida para creación nueva")
                     created_count += 1
+
 
                 if not valid:
                     error_count += 1
