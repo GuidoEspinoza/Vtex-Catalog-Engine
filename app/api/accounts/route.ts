@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import { VtexAccount } from '@/types/database';
+import { COOKIE_SESSION_NAME, verifySessionToken } from '@/lib/auth';
 
+function checkAdmin(req: NextRequest): boolean {
+  const roleHeader = req.headers.get('x-user-role');
+  if (roleHeader === 'admin') return true;
+
+  const token = req.cookies.get(COOKIE_SESSION_NAME)?.value;
+  const user = verifySessionToken(token);
+  return user?.role === 'admin';
+}
 
 export async function GET() {
   try {
@@ -27,6 +35,13 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    if (!checkAdmin(req)) {
+      return NextResponse.json(
+        { error: 'Prohibido: Solo los administradores pueden registrar o gestionar cuentas VTEX.' },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json();
     const { company_name, account_name, environment, app_key, app_token } = body;
 
@@ -62,6 +77,13 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
+    if (!checkAdmin(req)) {
+      return NextResponse.json(
+        { error: 'Prohibido: Solo los administradores pueden eliminar cuentas VTEX.' },
+        { status: 403 }
+      );
+    }
+
     const { searchParams } = new URL(req.url);
     const id = searchParams.get('id');
 

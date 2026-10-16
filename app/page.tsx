@@ -24,9 +24,12 @@ import {
   Info,
   Trash2,
   Download,
+  Users,
 } from 'lucide-react';
 import { VtexAccount } from '@/types/database';
+import { SessionUser } from '@/lib/auth';
 import PriceCleanupModal from '@/components/PriceCleanupModal';
+import UserManagementModal from '@/components/UserManagementModal';
 
 interface LogEntry {
   id: string;
@@ -105,6 +108,8 @@ export default function CatalogEngineDashboard() {
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [showNewAccountModal, setShowNewAccountModal] = useState(false);
   const [showPriceCleanupModal, setShowPriceCleanupModal] = useState(false);
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [currentUser, setCurrentUser] = useState<SessionUser | null>(null);
 
   // Formulario nueva cuenta
   const [newAccount, setNewAccount] = useState({
@@ -155,8 +160,21 @@ export default function CatalogEngineDashboard() {
     }
   };
 
+  const fetchSession = async () => {
+    try {
+      const res = await fetch('/api/auth/session');
+      const data = await res.json();
+      if (data?.user) {
+        setCurrentUser(data.user);
+      }
+    } catch {
+      // Error silencioso
+    }
+  };
+
   useEffect(() => {
     fetchAccounts();
+    fetchSession();
   }, []);
 
   useEffect(() => {
@@ -175,6 +193,10 @@ export default function CatalogEngineDashboard() {
 
   const handleCreateAccount = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (currentUser?.role !== 'admin') {
+      alert('Solo los administradores tienen permiso para registrar cuentas VTEX.');
+      return;
+    }
     setSavingAccount(true);
     try {
       const res = await fetch('/api/accounts', {
@@ -376,13 +398,15 @@ export default function CatalogEngineDashboard() {
                 ))}
               </select>
             )}
-            <button
-              onClick={() => setShowNewAccountModal(true)}
-              className="text-pink-400 hover:text-pink-300 ml-1 p-1 hover:bg-slate-800 rounded transition-colors"
-              title="Registrar nueva cuenta VTEX"
-            >
-              <PlusCircle className="h-4 w-4" />
-            </button>
+            {currentUser?.role === 'admin' && (
+              <button
+                onClick={() => setShowNewAccountModal(true)}
+                className="text-pink-400 hover:text-pink-300 ml-1 p-1 hover:bg-slate-800 rounded transition-colors cursor-pointer"
+                title="Registrar nueva cuenta VTEX (Solo Administrador)"
+              >
+                <PlusCircle className="h-4 w-4" />
+              </button>
+            )}
           </div>
 
           {/* Price Cleanup Button */}
@@ -394,6 +418,36 @@ export default function CatalogEngineDashboard() {
             <Trash2 className="h-3.5 w-3.5 text-rose-400" />
             <span className="hidden sm:inline">Limpieza de Precios</span>
           </button>
+
+          {/* User Management Button (Solo Admin) */}
+          {currentUser?.role === 'admin' && (
+            <button
+              onClick={() => setShowUserModal(true)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-indigo-500/40 bg-indigo-950/20 text-indigo-300 hover:bg-indigo-900/30 hover:border-indigo-500/60 transition-all text-xs font-semibold shadow-sm cursor-pointer"
+              title="Gestión de usuarios y accesos @nexitty.com"
+            >
+              <Users className="h-3.5 w-3.5 text-indigo-400" />
+              <span className="hidden sm:inline">Usuarios</span>
+            </button>
+          )}
+
+          {/* Active User Badge */}
+          {currentUser && (
+            <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 bg-slate-950/80 border border-slate-800 rounded-xl text-xs text-slate-400 shadow-inner">
+              <span className="truncate max-w-[160px] text-slate-300 font-medium">
+                {currentUser.email}
+              </span>
+              <span
+                className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${
+                  currentUser.role === 'admin'
+                    ? 'bg-purple-950 text-purple-300 border border-purple-800/60'
+                    : 'bg-cyan-950 text-cyan-300 border border-cyan-800/60'
+                }`}
+              >
+                {currentUser.role}
+              </span>
+            </div>
+          )}
 
           {/* Logout */}
           <button
@@ -742,8 +796,8 @@ export default function CatalogEngineDashboard() {
         </section>
       </main>
 
-      {/* Modal Nueva Cuenta */}
-      {showNewAccountModal && (
+      {/* Modal Nueva Cuenta (Solo Admin) */}
+      {showNewAccountModal && currentUser?.role === 'admin' && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-lg shadow-2xl">
             <h3 className="text-lg font-bold text-white mb-2">Registrar Nueva Cuenta VTEX</h3>
@@ -838,6 +892,13 @@ export default function CatalogEngineDashboard() {
         isOpen={showPriceCleanupModal}
         onClose={() => setShowPriceCleanupModal(false)}
         selectedAccount={selectedAccountObj}
+      />
+
+      {/* User Management Modal */}
+      <UserManagementModal
+        isOpen={showUserModal}
+        onClose={() => setShowUserModal(false)}
+        currentUser={currentUser}
       />
     </div>
   );

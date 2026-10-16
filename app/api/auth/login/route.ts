@@ -1,57 +1,90 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { COOKIE_SESSION_NAME, createSessionToken } from '@/lib/auth';
-import { checkLoginRateLimit, recordFailedLogin, resetLoginAttempts } from '@/lib/rate-limit';
+import { supabaseAdmin, supabasePublic } from '@/lib/supabase';
+import { createSessionToken, COOKIE_SESSION_NAME } from '@/lib/auth';
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    // Extraer IP del cliente para rate limiting
-    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
+    const body = await req.json();
+    const { email: rawEmail, password } = body;
 
-    // Verificar rate limit
-    const rateCheck = checkLoginRateLimit(ip);
-    if (!rateCheck.allowed) {
+    if (!rawEmail || typeof rawEmail !== 'string') {
       return NextResponse.json(
-        {
-          error: `Demasiados intentos fallidos. Acceso bloqueado temporalmente. Intenta nuevamente en ${rateCheck.retryAfterSeconds} segundos.`,
-        },
-        { status: 429 }
+        { error: 'El correo electrónico es requerido.' },
+        { status: 400 }
+      );
+    }
+    if (!password || typeof password !== 'string') {
+      return NextResponse.json(
+        { error: 'La contraseña es requerida.' },
+        { status: 400 }
       );
     }
 
-    const body = await request.json();
-    const password = body?.password;
-    const masterPassword = process.env.AUTH_PASSWORD;
+    const email = rawEmail.toLowerCase().trim();
 
-    if (!masterPassword) {
+    // 1. Validar dominio corporativo @nexitty.com
+    if (!email.endsWith('@nexitty.com')) {
       return NextResponse.json(
-        { error: 'AUTH_PASSWORD no configurado en el servidor.' },
+        { error: 'Restricción de acceso: Solo se permiten correos corporativos @nexitty.com.' },
+        { status: 403 }
+      );
+    }
+
+    // 2. Verificar que el usuario esté autorizado en la tabla app_users y obtener su rol
+    const { data: appUser, error: appUserErr } = await supabaseAdmin
+      .from('app_users')
+      .select('id, email, role')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (appUserErr) {
+      console.error('Error consultando app_users:', appUserErr);
+      return NextResponse.json(
+        { error: 'Error al verificar credenciales internas en la base de datos.' },
         { status: 500 }
       );
     }
 
-    if (!password || password !== masterPassword) {
-      recordFailedLogin(ip);
-      const remaining = Math.max(0, rateCheck.remainingAttempts - 1);
+    if (!appUser) {
       return NextResponse.json(
-        {
-          error: `Contraseña incorrecta.${remaining > 0 ? ` Te quedan ${remaining} intentos antes del bloqueo.` : ' Acceso bloqueado por 15 minutos.'}`,
-        },
+        { error: 'Acceso no autorizado. Tu cuenta no está registrada en el panel interno. Contacta al administrador.' },
+        { status: 403 }
+      );
+    }
+
+    // 3. Autenticar correo y contraseña en Supabase Auth
+    const { data: authData, error: authError } = await supabasePublic.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (authError || !authData.user) {
+      return NextResponse.json(
+        { error: 'Correo o contraseña incorrectos. Verifica tus credenciales.' },
         { status: 401 }
       );
     }
 
-    // Login exitoso: restablecer intentos
-    resetLoginAttempts(ip);
+    // 4. Generar token de sesión firmado HMAC (vigencia 7 días)
+    const sessionToken = createSessionToken({
+      id: authData.user.id,
+      email: authData.user.email || email,
+      role: appUser.role === 'admin' ? 'admin' : 'internal',
+      name: email.split('@')[0],
+    });
 
-    // Generar token derivado criptográfico (HMAC)
-    const sessionToken = createSessionToken(masterPassword);
+    const response = NextResponse.json({
+      success: true,
+      message: 'Inicio de sesión exitoso.',
+      user: {
+        id: authData.user.id,
+        email,
+        role: appUser.role,
+      },
+    });
 
-    const response = NextResponse.json({ success: true, message: 'Autenticación exitosa' });
-
-    // Inyectar cookie HTTP-Only protegida
-    response.cookies.set({
-      name: COOKIE_SESSION_NAME,
-      value: sessionToken,
+    // 5. Configurar cookie segura HttpOnly
+    response.cookies.set(COOKIE_SESSION_NAME, sessionToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -60,7 +93,11 @@ export async function POST(request: NextRequest) {
     });
 
     return response;
-  } catch {
-    return NextResponse.json({ error: 'Solicitud inválida' }, { status: 400 });
+  } catch (err: any) {
+    console.error('Error inesperado en login:', err);
+    return NextResponse.json(
+      { error: `Error interno de autenticación: ${err.message || err}` },
+      { status: 500 }
+    );
   }
 }
