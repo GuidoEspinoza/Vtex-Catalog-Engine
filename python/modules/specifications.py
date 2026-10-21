@@ -128,12 +128,14 @@ def get_or_create_group(client: VtexClient, category_id: Optional[int], group_na
     return None
 
 def get_existing_fields_for_category(client: VtexClient, category_id: Optional[int], cache: dict) -> Dict[str, dict]:
-    """Obtiene campos existentes indexados por nombre normalizado."""
+    """Obtiene campos existentes indexados por nombre normalizado consultando el árbol de especificaciones."""
     cat_key = category_id if category_id and category_id > 0 else 0
     if cat_key in cache:
         return cache[cat_key]
 
-    url = f"/api/catalog_system/pub/specification/field/listByCategoryId/{cat_key}" if cat_key > 0 else "/api/catalog_system/pub/specification/field/listTreeByCategoryId/0"
+    # listTreeByCategoryId con cualquier categoría válida (ej: cat_key o 1) trae los campos globales y de la categoría
+    target_cat = cat_key if cat_key > 0 else 1
+    url = f"/api/catalog_system/pub/specification/field/listTreeByCategoryId/{target_cat}"
     fields_map = {}
     try:
         res = client.get(url)
@@ -141,8 +143,15 @@ def get_existing_fields_for_category(client: VtexClient, category_id: Optional[i
             data = res.json()
             if isinstance(data, list):
                 for f in data:
+                    f_cat = f.get("CategoryId")
                     name_key = normalize_text(f.get("Name", ""))
-                    if name_key:
+                    if not name_key:
+                        continue
+                    # Si cat_key == 0 (global), guardar campos con CategoryId is None
+                    # Si cat_key > 0, guardar campos específicos de esta categoría o globales
+                    if cat_key == 0 and f_cat is None:
+                        fields_map[name_key] = f
+                    elif cat_key > 0 and (f_cat == cat_key or f_cat is None):
                         fields_map[name_key] = f
     except Exception:
         pass
@@ -175,6 +184,11 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
         required_col = find_column(df.columns, ['es obligatorio', 'obligatorio', 'isrequired', 'requerido'])
         filter_col = find_column(df.columns, ['es filtro', 'filtro', 'isfilter'])
         active_col = find_column(df.columns, ['activo', 'isactive'])
+        show_col = find_column(df.columns, [
+            'show specification', 'show in specification', 'mostrar en especificacion',
+            'mostrar en especificación', 'mostrar especificacion', 'mostrar especificación',
+            'isonproductdetails', 'mostrar en producto', 'mostrar ficha', 'mostrar'
+        ])
 
         if not name_col or not group_col:
             emit_log("error", f"Faltan columnas requeridas ('Nombre del Atributo' y 'Nombre del Grupo'). Detectadas: {list(df.columns)}")
@@ -219,6 +233,17 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
             is_required = parse_bool(row[required_col]) if required_col else False
             is_filter = parse_bool(row[filter_col]) if filter_col else False
             is_active = parse_bool(row[active_col], default=True) if active_col else True
+            # Requisito VTEX: Show Specification (IsOnProductDetails) debe ser True para no requerir alterar planillas
+            is_on_product_details = parse_bool(row[show_col], default=True) if show_col else True
+
+            # REGLA ESTRICTA DE VTEX: Los atributos de SKU únicamente pueden ser Combo (5) o Radio (6)
+            if is_sku and field_type not in [5, 6]:
+                emit_log(
+                    "warning",
+                    f"Fila #{row_num}: El atributo '{field_name}' está configurado como SKU, pero VTEX solo permite tipo 'Combo' (5) o 'Radio' (6) para variantes de SKU (no permite {field_type_name}). Se ajusta automáticamente a Combo."
+                )
+                field_type = 5
+                field_type_name = "Combo"
 
             field_desc = f"'{field_name}' [Cat: {cat_id or 0}, Grupo: {group_name}]"
 
@@ -231,7 +256,7 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
                 existing_id = existing_field.get("FieldId")
                 # Obtener detalle completo si no lo tenemos en caché
                 if existing_id not in field_detail_cache:
-                    det_res = client.get(f"/api/catalog_system/pub/specification/fieldGet/{existing_id}")
+                    det_res = client.get(f"/api/catalog/pvt/specification/{existing_id}")
                     if det_res.status_code == 200:
                         field_detail_cache[existing_id] = det_res.json()
                     else:
@@ -241,19 +266,33 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
                 existing_type_id = full_det.get("FieldTypeId")
                 existing_type_name = VTEX_FIELD_TYPE_NAMES.get(existing_type_id, full_det.get("FieldTypeName", "Desconocido"))
 
-                if existing_type_id == field_type:
+                if existing_type_id == field_type or (is_sku and existing_type_id in [5, 6]):
                     if dry_run:
-                        emit_progress(row_num, total_rows, field_desc, f"-> [DRY-RUN] Ya existe (FieldId: {existing_id}, Tipo: {existing_type_name}) - Sin duplicar")
+                        emit_progress(row_num, total_rows, field_desc, f"-> [DRY-RUN] Ya existe (FieldId: {existing_id}, Tipo: {existing_type_name}) - Se actualizará (ShowSpec: {is_on_product_details})")
                         updated_count += 1
                     else:
-                        update_payload = dict(full_det)
-                        update_payload["Description"] = str(row[description_col]).strip() if description_col and pd.notna(row[description_col]) else full_det.get("Description", field_name)
-                        update_payload["IsRequired"] = is_required
-                        update_payload["IsFilter"] = is_filter
-                        update_payload["IsActive"] = is_active
-                        update_res = client.put("/api/catalog_system/pvt/specification/field", json=update_payload)
+                        group_id = get_or_create_group(client, cat_id, group_name, group_cache, dry_run)
+                        update_payload = {
+                            "Id": existing_id,
+                            "CategoryId": cat_id,
+                            "FieldGroupId": full_det.get("FieldGroupId") or group_id,
+                            "Name": field_name,
+                            "Description": str(row[description_col]).strip() if description_col and pd.notna(row[description_col]) else full_det.get("Description", field_name),
+                            "FieldTypeId": existing_type_id,
+                            "IsStockKeepingUnit": is_sku,
+                            "IsRequired": is_required,
+                            "IsFilter": is_filter,
+                            "IsActive": is_active,
+                            "IsOnProductDetails": is_on_product_details,
+                            "Position": full_det.get("Position", 1),
+                            "IsWizard": full_det.get("IsWizard", False),
+                            "IsTopMenuLinkActive": full_det.get("IsTopMenuLinkActive", False),
+                            "IsSideMenuLinkActive": full_det.get("IsSideMenuLinkActive", False),
+                            "DefaultValue": full_det.get("DefaultValue", ""),
+                        }
+                        update_res = client.put(f"/api/catalog/pvt/specification/{existing_id}", json=update_payload)
                         if update_res.status_code in [200, 201]:
-                            emit_progress(row_num, total_rows, field_desc, f"-> 🔄 Actualizado (FieldId: {existing_id}, Tipo: {existing_type_name})")
+                            emit_progress(row_num, total_rows, field_desc, f"-> 🔄 Actualizado (FieldId: {existing_id}, Tipo: {existing_type_name}, ShowSpec: {is_on_product_details})")
                         else:
                             emit_progress(row_num, total_rows, field_desc, f"-> ℹ️ Ya existe (FieldId: {existing_id}, Tipo: {existing_type_name})")
                         updated_count += 1
@@ -284,23 +323,30 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
                 "IsRequired": is_required,
                 "IsFilter": is_filter,
                 "IsActive": is_active,
+                "IsOnProductDetails": is_on_product_details,
+                "Position": 1,
+                "IsWizard": False,
                 "IsTopMenuLinkActive": False,
-                "IsSideMenuLinkActive": False
+                "IsSideMenuLinkActive": False,
+                "DefaultValue": "",
             }
 
             if dry_run:
-                emit_progress(row_num, total_rows, field_desc, f"-> [DRY-RUN] Válido para creación (Tipo: {field_type_name}, SKU: {is_sku})")
+                emit_progress(row_num, total_rows, field_desc, f"-> [DRY-RUN] Válido para creación (Tipo: {field_type_name}, SKU: {is_sku}, ShowSpec: {is_on_product_details})")
                 created_count += 1
             else:
-                endpoint = "/api/catalog_system/pvt/specification/field"
+                endpoint = "/api/catalog/pvt/specification"
                 res = client.post(endpoint, json=payload)
                 if res.status_code in [200, 201]:
                     res_data = res.json() if res.text else {}
                     res_id = res_data.get("Id", "")
-                    emit_progress(row_num, total_rows, field_desc, f"-> ✅ Creado (FieldId: {res_id}, Tipo: {field_type_name})")
+                    emit_progress(row_num, total_rows, field_desc, f"-> ✅ Creado (FieldId: {res_id}, Tipo: {field_type_name}, ShowSpec: {is_on_product_details})")
                     created_count += 1
                     # Actualizar caché
                     existing_fields[norm_name] = {"FieldId": res_id, "Name": field_name, "FieldTypeId": field_type}
+                elif res.status_code == 400 and any(msg in res.text for msg in ["duplicated field name", "The field could not be created", "already exists"]):
+                    emit_progress(row_num, total_rows, field_desc, f"-> ℹ️ Ya registrado previamente en VTEX")
+                    updated_count += 1
                 else:
                     emit_log("error", f"Fila #{row_num}: Error al crear campo ({res.status_code}): {res.text[:120]}")
                     error_count += 1
@@ -311,3 +357,4 @@ def process_specifications(client: VtexClient, file_path: str, dry_run: bool = F
 
     except Exception as e:
         emit_log("error", f"Error crítico procesando especificaciones: {str(e)}")
+

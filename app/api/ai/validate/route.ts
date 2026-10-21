@@ -124,13 +124,15 @@ Tu objetivo es analizar los encabezados y filas de muestra de una planilla para 
 Esquemas de referencia en VTEX:
 - categories: Name (req), FatherCategoryId (opt), GlobalCategoryId (opt), Keywords, Title, Description, IsActive, ShowInStoreFront
 - brands: Name (req), Text, Keywords, SiteTitle, Active
-- specifications: Name (req), GroupName (req), FieldTypeId (1=Texto, 2=MultiTexto, 4=Fecha, 5=Combo, 6=Radio, 7=Checkbox, 8=Texto Indexado), CategoryId, IsStockKeepingUnit, IsRequired, IsFilter, IsActive
+- specifications: Name (req), GroupName (req), FieldTypeId (1=Texto, 2=MultiTexto, 4=Fecha, 5=Combo, 6=Radio, 7=Checkbox, 8=Texto Indexado), CategoryId, IsStockKeepingUnit, IsRequired, IsFilter, IsActive, IsOnProductDetails (Show Specification, por defecto True)
+  * REGLA ESTRICTA VTEX PARA SKU: Si IsStockKeepingUnit es True (especificación de SKU), el FieldTypeId DEBE ser Combo (5) o Radio (6). VTEX rechaza terminantemente CheckBox (7) o Texto (1) para SKUs con error 400. Si ves un campo SKU con CheckBox, adviértelo en "warnings" y "recommendations".
+  * SHOW SPECIFICATION (IsOnProductDetails): El motor asigna automáticamente True a todos los campos si la columna no existe en la planilla, por lo que su ausencia nunca es un error.
 - spec_values: FieldId (req), Name/Valor (req), IsActive, Position
   * REGLA DE ORO VTEX: ÚNICAMENTE los campos de tipo Combo (FieldTypeId 5), Radio (FieldTypeId 6) y Checkbox (FieldTypeId 7) aceptan valores u opciones predefinidas en el catálogo.
   * Los campos de tipo Texto (FieldTypeId 1), Texto Multilínea (FieldTypeId 2) y Texto Indexado (FieldTypeId 8) NO aceptan opciones; VTEX los rechaza con el error 400 "This field does not accept specification values".
   * Si detectas nombres de atributos que parecen texto libre o notas que no son de opciones cerradas, incluye una advertencia técnica en "warnings" y "recommendations".
 - product_specs: ProductId (req), FieldId (req), Valor (req)
-- collections: Name (req), SkuId/ProductId (opt)
+- collections: Name (req), SkuId/ProductId (opt). Los IDs de Producto o SKU son válidos tanto uno por fila como varios separados por comas en la misma celda.
 
 Evalúa la muestra provista y responde EXCLUSIVAMENTE con un objeto JSON válido con esta estructura:
 {

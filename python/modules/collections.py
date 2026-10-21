@@ -56,10 +56,33 @@ def associate_sku_to_subcollection(client: VtexClient, subcollection_id: int, sk
     except Exception:
         return False
 
+def parse_id_list(val) -> List[int]:
+    """Extrae una lista de IDs numéricos admitiendo enteros, cadenas simples o cadenas separadas por comas, punto y coma o espacios."""
+    if pd.isna(val):
+        return []
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() == 'nan':
+        return []
+    import re
+    tokens = re.split(r'[,;|\s\n\r]+', val_str)
+    res = []
+    for t in tokens:
+        clean = t.strip()
+        if not clean:
+            continue
+        try:
+            num = int(float(clean))
+            if num > 0:
+                res.append(num)
+        except (ValueError, TypeError):
+            continue
+    return res
+
 def process_collections(client: VtexClient, file_path: str, dry_run: bool = False):
     """
     Crea o actualiza colecciones dinámicas y asocia SKUs/Productos a su subcolección.
     Agrupa automáticamente los ítems por colección para evitar creaciones duplicadas.
+    Admite IDs de producto y SKU en filas individuales O separados por comas en la misma celda.
     """
     if not os.path.exists(file_path):
         emit_log("error", f"No se encontró el archivo: {file_path}")
@@ -79,8 +102,8 @@ def process_collections(client: VtexClient, file_path: str, dry_run: bool = Fals
         
         # Búsqueda estricta de ID de colección para no confundir con ID Producto / ID SKU
         col_id_col = next((c for c in df.columns if c.lower() in ['id colección', 'id coleccion', 'collection id', 'collectionid', 'id_coleccion']), None)
-        prod_id_col = next((c for c in df.columns if c.lower() in ['id producto', 'id del producto', 'productid', 'producto']), None)
-        sku_id_col = next((c for c in df.columns if c.lower() in ['id sku', 'sku id', 'skuid', 'sku']), None)
+        prod_id_col = next((c for c in df.columns if c.lower() in ['id producto', 'id del producto', 'id productos', 'productid', 'producto', 'productos']), None)
+        sku_id_col = next((c for c in df.columns if c.lower() in ['id sku', 'sku id', 'id skus', 'skuid', 'sku', 'skus']), None)
 
         if not name_col:
             emit_log("error", f"Falta la columna obligatoria de nombre de colección ('Nombre Colección'). Columnas detectadas: {list(df.columns)}")
@@ -124,26 +147,18 @@ def process_collections(client: VtexClient, file_path: str, dry_run: bool = Fals
                     "description": str(row[desc_col]).strip() if desc_col and pd.notna(row[desc_col]) else "",
                     "searchable": is_searchable,
                     "highlight": is_highlight,
-                    "items": []
+                    "sku_ids": set(),
+                    "prod_ids": set()
                 }
 
-            # Extraer SKU o Producto asociado
-            sku_val = None
+            # Extraer SKU o Producto asociado (soporta tanto un ID como lista separada por comas)
             if sku_id_col and pd.notna(row[sku_id_col]):
-                try:
-                    sku_val = int(float(row[sku_id_col]))
-                except Exception:
-                    pass
+                for s_id in parse_id_list(row[sku_id_col]):
+                    collections_map[c_name]["sku_ids"].add(s_id)
 
-            prod_val = None
             if prod_id_col and pd.notna(row[prod_id_col]):
-                try:
-                    prod_val = int(float(row[prod_id_col]))
-                except Exception:
-                    pass
-
-            if sku_val or prod_val:
-                collections_map[c_name]["items"].append({"sku_id": sku_val, "prod_id": prod_val})
+                for p_id in parse_id_list(row[prod_id_col]):
+                    collections_map[c_name]["prod_ids"].add(p_id)
 
         emit_log("info", f"Se agruparon {len(collections_map)} colecciones únicas con sus respectivos ítems.")
 
@@ -157,11 +172,12 @@ def process_collections(client: VtexClient, file_path: str, dry_run: bool = Fals
 
         for col_name, c_data in collections_map.items():
             col_num += 1
-            num_items = len(c_data["items"])
-            col_desc = f"Colección '{col_name}' ({num_items} ítems)"
+            num_skus = len(c_data["sku_ids"])
+            num_prods = len(c_data["prod_ids"])
+            col_desc = f"Colección '{col_name}' ({num_prods} productos, {num_skus} SKUs directos)"
 
             if dry_run:
-                emit_progress(col_num, total_cols, col_desc, f"-> [DRY-RUN] Válida para creación/actualización con {num_items} ítems")
+                emit_progress(col_num, total_cols, col_desc, f"-> [DRY-RUN] Válida para creación/actualización con {num_prods} productos y {num_skus} SKUs")
                 created_count += 1
                 time.sleep(0.05)
                 continue
@@ -197,28 +213,29 @@ def process_collections(client: VtexClient, file_path: str, dry_run: bool = Fals
                     emit_log("warning", f"{col_desc}: Creada (ID: {actual_col_id}), pero no se pudo obtener subcolección para asociar ítems.")
                     continue
 
-                # 3. Asociar SKUs
+                # 3. Consolidar todos los SKUs (incluyendo todos los SKUs de cada producto especificado)
+                all_target_skus = set(c_data["sku_ids"])
+
+                for p_id in c_data["prod_ids"]:
+                    try:
+                        p_res = client.get(f"/api/catalog_system/pvt/sku/stockkeepingunitByProductId/{p_id}")
+                        if p_res.status_code == 200:
+                            skus_list = p_res.json()
+                            if isinstance(skus_list, list):
+                                for s in skus_list:
+                                    s_id = s.get("Id") or s.get("id")
+                                    if s_id:
+                                        all_target_skus.add(int(s_id))
+                    except Exception:
+                        pass
+
                 items_linked = 0
-                for item in c_data["items"]:
-                    target_sku = item.get("sku_id")
+                for target_sku in all_target_skus:
+                    ok = associate_sku_to_subcollection(client, subcol_id, target_sku, dry_run=False)
+                    if ok:
+                        items_linked += 1
 
-                    # Si solo tenemos ID de producto, consultar los SKUs del producto
-                    if not target_sku and item.get("prod_id"):
-                        try:
-                            p_res = client.get(f"/api/catalog_system/pvt/sku/stockkeepingunitByProductId/{item['prod_id']}")
-                            if p_res.status_code == 200:
-                                skus_list = p_res.json()
-                                if isinstance(skus_list, list) and len(skus_list) > 0:
-                                    target_sku = skus_list[0].get("Id")
-                        except Exception:
-                            pass
-
-                    if target_sku:
-                        ok = associate_sku_to_subcollection(client, subcol_id, target_sku, dry_run=False)
-                        if ok:
-                            items_linked += 1
-
-                emit_progress(col_num, total_cols, col_desc, f"-> ✅ Creada (ID: {actual_col_id}, {items_linked}/{num_items} SKUs asociados)")
+                emit_progress(col_num, total_cols, col_desc, f"-> ✅ Creada (ID: {actual_col_id}, {items_linked}/{len(all_target_skus)} SKUs vinculados)")
 
             except Exception as e:
                 emit_log("error", f"{col_desc}: Excepción al procesar: {str(e)}")
