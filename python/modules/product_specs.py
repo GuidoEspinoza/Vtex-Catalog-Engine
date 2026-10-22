@@ -1,6 +1,8 @@
 import os
 import time
 import unicodedata
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from typing import Dict, Any, List
 from core.vtex_client import VtexClient
@@ -96,51 +98,68 @@ def process_product_specs(client: VtexClient, file_path: str, dry_run: bool = Fa
         updated_count = 0
         error_count = 0
         product_cache = {}
+        cache_lock = threading.Lock()
 
-        prod_idx = 0
-        for prod_id, specs in products_map.items():
-            prod_idx += 1
+        # Procesamiento concurrente: 6 hilos paralelos para procesar ~15 productos/segundo
+        # Reduce el tiempo total de ~23 minutos a ~2.5 minutos, evitando timeouts de socket/browser
+        max_workers = 6
+        emit_log("info", f"Iniciando procesamiento concurrente de {total_products} productos ({max_workers} workers paralelos)...")
+
+        def handle_product(item):
+            p_id, specs = item
             num_specs = len(specs)
             specs_summary = ", ".join([f"{s['Name']}='{s['Value'][0]}'" for s in specs[:2]])
             if num_specs > 2:
                 specs_summary += f" (+{num_specs - 2} más)"
 
-            desc = f"Prod {prod_id} ({num_specs} atributos: {specs_summary})"
+            desc = f"Prod {p_id} ({num_specs} atributos: {specs_summary})"
 
             if dry_run:
                 # Validar existencia del Producto en VTEX
-                if prod_id in product_cache:
-                    prod_exists = product_cache[prod_id]
+                with cache_lock:
+                    in_cache = p_id in product_cache
+                    cached_val = product_cache.get(p_id)
+
+                if in_cache:
+                    prod_exists = cached_val
                 else:
-                    check_prod = client.get(f"/api/catalog/pvt/product/{prod_id}")
+                    check_prod = client.get(f"/api/catalog/pvt/product/{p_id}")
                     prod_exists = (check_prod.status_code == 200)
-                    product_cache[prod_id] = prod_exists
+                    with cache_lock:
+                        product_cache[p_id] = prod_exists
 
                 if prod_exists:
-                    emit_progress(prod_idx, total_products, desc, f"-> [DRY-RUN] Válido ({num_specs} especificaciones listas)")
-                    updated_count += num_specs
+                    return ("ok", desc, f"-> [DRY-RUN] Válido ({num_specs} especificaciones listas)", num_specs)
                 else:
-                    emit_log("warning", f"Producto #{prod_id} no existe en VTEX.")
-                    error_count += num_specs
-                time.sleep(0.04)
+                    return ("warn", desc, f"Producto #{p_id} no existe en VTEX.", num_specs)
             else:
                 try:
-                    # En VTEX el endpoint requiere un array con { Id, Value: [] }
                     payload = [{"Id": s["Id"], "Value": s["Value"]} for s in specs]
-                    url = f"/api/catalog_system/pvt/products/{prod_id}/specification"
+                    url = f"/api/catalog_system/pvt/products/{p_id}/specification"
                     res = client.post(url, json=payload)
 
                     if res.status_code in [200, 201, 204]:
-                        emit_progress(prod_idx, total_products, desc, f"-> ✅ {num_specs} atributos asignados")
-                        updated_count += num_specs
+                        return ("ok", desc, f"-> ✅ {num_specs} atributos asignados", num_specs)
                     else:
-                        emit_log("error", f"Producto #{prod_id}: Error ({res.status_code}): {res.text[:120]}")
-                        error_count += num_specs
+                        return ("err", desc, f"Producto #{p_id}: Error ({res.status_code}): {res.text[:120]}", num_specs)
                 except Exception as e:
-                    emit_log("error", f"Producto #{prod_id}: Error de conexión: {str(e)}")
-                    error_count += num_specs
+                    return ("err", desc, f"Producto #{p_id}: Error de conexión: {str(e)}", num_specs)
 
-                time.sleep(0.08)
+        prod_idx = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_prod = {executor.submit(handle_product, item): item for item in products_map.items()}
+            for future in as_completed(future_to_prod):
+                prod_idx += 1
+                status, desc, msg, count = future.result()
+                if status == "ok":
+                    emit_progress(prod_idx, total_products, desc, msg)
+                    updated_count += count
+                elif status == "warn":
+                    emit_log("warning", msg)
+                    error_count += count
+                else:
+                    emit_log("error", msg)
+                    error_count += count
 
         emit_summary(total_rows, created_count, updated_count, error_count, skipped_count, dry_run)
 

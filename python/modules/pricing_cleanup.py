@@ -10,14 +10,18 @@ from core.events import emit_log, emit_progress, emit_summary
 
 def process_pricing_cleanup(
     client: VtexClient,
-    target_tables: List[str],
+    target_tables: Optional[List[str]] = None,
     file_path: Optional[str] = None,
     dry_run: bool = False,
-    max_workers: int = 8
+    max_workers: int = 8,
+    delete_root: bool = False
 ):
     """
-    Elimina precios fijos de SKUs asociados a tablas de precios específicas en VTEX.
-    Soporta modo masivo por escaneo de catálogo y modo acotado por archivo Excel.
+    Limpieza y eliminación de precios en VTEX.
+    - delete_root=True: Elimina DE RAÍZ el precio de los SKUs (Precio Base + Precios Fijos de todas las tablas).
+      Llama a DELETE /pricing/prices/{skuId}. El SKU queda en estado 'Sin Precio'.
+    - delete_root=False: Elimina precios fijos de SKUs asociados a tablas de precios específicas.
+      Llama a DELETE /pricing/prices/{skuId}/fixed/{tableId}.
     """
     account = client.account
     pricing_base_url = f"https://api.vtex.com/{account}/pricing/prices"
@@ -30,6 +34,137 @@ def process_pricing_cleanup(
     }
 
     mode_label = "SIMULACIÓN (DRY-RUN)" if dry_run else "PRODUCCIÓN"
+
+    # =========================================================================
+    # CASO 1: ELIMINACIÓN DE RAÍZ (DELETE /pricing/prices/{skuId})
+    # =========================================================================
+    if delete_root:
+        emit_log("info", f"=== Eliminación Total de Precios VTEX (DE RAÍZ) ({mode_label}) ===")
+        emit_log("info", f"Cuenta activa: {account} | Modo: {'Por Planilla' if file_path else 'Catálogo Completo'}")
+        emit_log("warning", "ATENCIÓN: Se eliminará el Precio Base y todos los precios fijos de todas las listas para los SKUs procesados.")
+
+        target_skus: List[str] = []
+
+        # 1.1 Carga por archivo Excel/CSV
+        if file_path and os.path.exists(file_path):
+            emit_log("info", f"Cargando SKUs desde archivo: {os.path.basename(file_path)}")
+            try:
+                df = pd.read_excel(file_path) if not file_path.endswith('.csv') else pd.read_csv(file_path)
+                df.columns = [str(c).strip().lower() for c in df.columns]
+
+                sku_col = next((c for c in df.columns if 'sku' in c or 'item' in c or 'id' in c), None)
+                if not sku_col:
+                    emit_log("error", f"No se encontró la columna de SKU ID en el archivo. Columnas detectadas: {list(df.columns)}")
+                    return
+
+                raw_skus = df[sku_col].dropna().tolist()
+                seen = set()
+                for raw in raw_skus:
+                    try:
+                        s_id = str(int(float(raw)))
+                    except Exception:
+                        s_id = str(raw).strip()
+                    if s_id and s_id not in seen:
+                        seen.add(s_id)
+                        target_skus.append(s_id)
+
+                emit_log("info", f"Se cargaron {len(target_skus)} SKUs únicos a procesar desde la planilla.")
+            except Exception as e:
+                emit_log("error", f"Error al leer planilla de SKUs: {str(e)}")
+                return
+        else:
+            # 1.2 Catálogo completo de la tienda
+            emit_log("info", "Consultando catálogo completo de SKUs en VTEX...")
+            page = 1
+            page_size = 1000
+
+            while True:
+                url = f"/api/catalog_system/pvt/sku/stockkeepingunitids?page={page}&pagesize={page_size}"
+                try:
+                    r = client.get(url)
+                    if r.status_code == 200:
+                        data = r.json()
+                        if not data:
+                            break
+                        target_skus.extend([str(item) for item in data])
+                        if len(data) < page_size:
+                            break
+                        page += 1
+                    else:
+                        emit_log("warning", f"Página {page} de SKUs respondió con status {r.status_code}")
+                        break
+                except Exception as e:
+                    emit_log("error", f"Error paginando SKUs de catálogo: {str(e)}")
+                    break
+
+            emit_log("info", f"Total de SKUs encontrados en catálogo: {len(target_skus)}")
+
+        total_operations = len(target_skus)
+        if total_operations == 0:
+            emit_log("warning", "No se encontraron SKUs para procesar.")
+            emit_summary(0, 0, 0, 0, 0, dry_run)
+            return
+
+        deleted_count = 0
+        error_count = 0
+        not_found_count = 0
+
+        if dry_run:
+            for idx, s_id in enumerate(target_skus):
+                desc = f"SKU {s_id}"
+                emit_progress(idx + 1, total_operations, desc, "-> [DRY-RUN] Simulado: Eliminación total de precio (Base + Precios Fijos)")
+                deleted_count += 1
+                if (idx + 1) % 25 == 0:
+                    time.sleep(0.01)
+        else:
+            session = requests.Session()
+            session.headers.update(pricing_headers)
+
+            def delete_sku_price_root(sku_id: str):
+                del_url = f"{pricing_base_url}/{sku_id}"
+                for attempt in range(3):
+                    try:
+                        del_res = session.delete(del_url, timeout=15)
+                        if del_res.status_code in [200, 204]:
+                            return "ok", sku_id, "✅ Precio eliminado de raíz (Base + Precios Fijos)"
+                        elif del_res.status_code == 404:
+                            return "not_found", sku_id, "ℹ️ Ya no tenía precio asignado (404)"
+                        elif del_res.status_code == 429:
+                            time.sleep(1 + attempt)
+                            continue
+                        else:
+                            return "error", sku_id, f"❌ Error {del_res.status_code}: {del_res.text[:80]}"
+                    except Exception as e:
+                        if attempt == 2:
+                            return "error", sku_id, f"❌ Fallo de red: {str(e)}"
+                        time.sleep(0.5)
+                return "error", sku_id, "❌ Timeout tras reintentos"
+
+            completed = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_sku = {executor.submit(delete_sku_price_root, sku): sku for sku in target_skus}
+                for future in as_completed(future_to_sku):
+                    completed += 1
+                    status, sku_id, msg = future.result()
+                    desc = f"SKU {sku_id}"
+
+                    if status == "ok":
+                        deleted_count += 1
+                        emit_progress(completed, total_operations, desc, f"-> {msg}")
+                    elif status == "not_found":
+                        not_found_count += 1
+                        emit_progress(completed, total_operations, desc, f"-> {msg}")
+                    else:
+                        error_count += 1
+                        emit_log("error", f"{desc} -> {msg}")
+
+        emit_summary(total_operations, 0, deleted_count + not_found_count, error_count, 0, dry_run)
+        emit_log("success", f"Operación de eliminación total de precios completada ({mode_label}).")
+        return
+
+    # =========================================================================
+    # CASO 2: LIMPIEZA DE PRECIOS FIJOS POR TABLA (DELETE /pricing/prices/{sku}/fixed/{table})
+    # =========================================================================
     emit_log("info", f"=== Limpieza de Listas de Precios VTEX ({mode_label}) ===")
     emit_log("info", f"Cuenta activa: {account} | Tablas objetivo: {target_tables}")
 
@@ -37,12 +172,10 @@ def process_pricing_cleanup(
         emit_log("error", "No se especificaron tablas de precios para limpiar.")
         return
 
-    # Normalizar tablas objetivo en minúsculas y conjunto
-    target_tables_set = {str(t).strip().lower() for t in target_tables if str(t).strip()}
-
+    target_tables_set = {str(t).strip().lower() for t in (target_tables or []) if str(t).strip()}
     sku_table_pairs: List[Dict[str, str]] = []
 
-    # 1. Modo por Excel (si se proporcionó archivo)
+    # 2.1 Modo por Excel (si se proporcionó archivo)
     if file_path and os.path.exists(file_path):
         emit_log("info", f"Cargando pares SKU-Tabla desde archivo: {os.path.basename(file_path)}")
         try:
@@ -68,11 +201,9 @@ def process_pricing_cleanup(
                 t_id = str(row[table_col]).strip() if table_col and pd.notna(row[table_col]) else None
 
                 if t_id:
-                    # Si la fila tiene tabla específica, chequear si está en las seleccionadas (o agregarla)
                     if not target_tables_set or t_id.lower() in target_tables_set:
                         sku_table_pairs.append({"sku_id": s_id, "table_id": t_id})
                 else:
-                    # Si no especifica tabla en la fila, aplicar a todas las tablas objetivo
                     for t in target_tables_set:
                         sku_table_pairs.append({"sku_id": s_id, "table_id": t})
 
@@ -81,7 +212,7 @@ def process_pricing_cleanup(
             emit_log("error", f"Error al leer planilla de precios: {str(e)}")
             return
 
-    # 2. Modo Automático por Catálogo: Obtener todos los SKUs de la tienda
+    # 2.2 Modo Automático por Catálogo: Obtener todos los SKUs de la tienda
     else:
         emit_log("info", "Consultando catálogo completo de SKUs en VTEX...")
         all_skus = []
@@ -114,7 +245,6 @@ def process_pricing_cleanup(
             emit_log("warning", "No se encontraron SKUs en la cuenta para procesar.")
             return
 
-        # Inspeccionar qué SKUs tienen precios fijos en las tablas objetivo
         emit_log("info", "Escaneando precios fijos mediante pool concurrente...")
 
         def inspect_sku(sku_id: int):
@@ -157,41 +287,61 @@ def process_pricing_cleanup(
         emit_summary(0, 0, 0, 0, 0, dry_run)
         return
 
-    # 3. Ejecución de la Limpieza (Dry-Run o DELETE Real)
+    # 2.3 Ejecución de la Limpieza de Precios Fijos
     deleted_count = 0
     error_count = 0
 
-    session = requests.Session()
-    session.headers.update(pricing_headers)
-
-    for i, item in enumerate(sku_table_pairs):
-        sku_id = item["sku_id"]
-        table_id = item["table_id"]
-        val_str = f" (${item.get('value')})" if "value" in item else ""
-        desc = f"SKU {sku_id} -> Tabla '{table_id}'{val_str}"
-
-        if dry_run:
+    if dry_run:
+        for i, item in enumerate(sku_table_pairs):
+            sku_id = item["sku_id"]
+            table_id = item["table_id"]
+            val_str = f" (${item.get('value')})" if "value" in item else ""
+            desc = f"SKU {sku_id} -> Tabla '{table_id}'{val_str}"
             emit_progress(i + 1, total_operations, desc, "-> [DRY-RUN] Marcado para eliminación")
             deleted_count += 1
-            time.sleep(0.01)
-        else:
-            del_url = f"{pricing_base_url}/{sku_id}/fixed/{table_id}"
-            try:
-                del_res = session.delete(del_url, timeout=10)
-                if del_res.status_code in [200, 204]:
-                    emit_progress(i + 1, total_operations, desc, "-> ✅ Eliminado exitosamente")
-                    deleted_count += 1
-                elif del_res.status_code == 404:
-                    emit_progress(i + 1, total_operations, desc, "-> ℹ️ Ya no existía (404)")
-                    deleted_count += 1
-                else:
-                    emit_log("error", f"Fallo al eliminar {desc} (Status {del_res.status_code}): {del_res.text[:100]}")
-                    error_count += 1
-            except Exception as e:
-                emit_log("error", f"Error de red en {desc}: {str(e)}")
-                error_count += 1
+            if (i + 1) % 25 == 0:
+                time.sleep(0.01)
+    else:
+        session = requests.Session()
+        session.headers.update(pricing_headers)
 
-            time.sleep(0.05)
+        def delete_fixed_price(item: Dict[str, Any]):
+            sku_id = item["sku_id"]
+            table_id = item["table_id"]
+            val_str = f" (${item.get('value')})" if "value" in item else ""
+            desc = f"SKU {sku_id} -> Tabla '{table_id}'{val_str}"
+            del_url = f"{pricing_base_url}/{sku_id}/fixed/{table_id}"
+
+            for attempt in range(3):
+                try:
+                    del_res = session.delete(del_url, timeout=10)
+                    if del_res.status_code in [200, 204]:
+                        return "ok", desc, "✅ Eliminado exitosamente"
+                    elif del_res.status_code == 404:
+                        return "not_found", desc, "ℹ️ Ya no existía (404)"
+                    elif del_res.status_code == 429:
+                        time.sleep(1 + attempt)
+                        continue
+                    else:
+                        return "error", desc, f"Fallo (Status {del_res.status_code}): {del_res.text[:80]}"
+                except Exception as e:
+                    if attempt == 2:
+                        return "error", desc, f"Error de red: {str(e)}"
+                    time.sleep(0.5)
+            return "error", desc, "Timeout tras reintentos"
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_item = {executor.submit(delete_fixed_price, item): item for item in sku_table_pairs}
+            for future in as_completed(future_to_item):
+                completed += 1
+                status, desc, msg = future.result()
+                if status in ["ok", "not_found"]:
+                    deleted_count += 1
+                    emit_progress(completed, total_operations, desc, f"-> {msg}")
+                else:
+                    error_count += 1
+                    emit_log("error", f"{desc} -> {msg}")
 
     emit_summary(total_operations, 0, deleted_count, error_count, 0, dry_run)
     emit_log("success", f"Operación de limpieza de precios completada ({mode_label}).")

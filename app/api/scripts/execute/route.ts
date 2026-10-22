@@ -6,7 +6,7 @@ import os from 'os';
 import { supabaseAdmin } from '@/lib/supabase';
 
 
-export const maxDuration = 300; // Permitir hasta 5 minutos de streaming en Vercel Pro/Services
+export const maxDuration = 900; // Permitir hasta 15 minutos en streaming
 
 export async function POST(req: NextRequest) {
   try {
@@ -113,7 +113,21 @@ export async function POST(req: NextRequest) {
       start(controller) {
         let isClosed = false;
 
+        // Keep-alive heartbeat cada 15 segundos para evitar que proxies o navegadores cierren la conexión por inactividad
+        const keepAliveTimer = setInterval(() => {
+          if (!isClosed) {
+            try {
+              controller.enqueue(new TextEncoder().encode(': keepalive\n\n'));
+            } catch {
+              clearInterval(keepAliveTimer);
+            }
+          } else {
+            clearInterval(keepAliveTimer);
+          }
+        }, 15000);
+
         const safeClose = () => {
+          clearInterval(keepAliveTimer);
           if (!isClosed) {
             isClosed = true;
             try {

@@ -25,10 +25,12 @@ import {
   Trash2,
   Download,
   Users,
+  PackageX,
 } from 'lucide-react';
 import { VtexAccount } from '@/types/database';
 import { SessionUser } from '@/lib/auth';
 import PriceCleanupModal from '@/components/PriceCleanupModal';
+import StockCleanupModal from '@/components/StockCleanupModal';
 import UserManagementModal from '@/components/UserManagementModal';
 
 interface LogEntry {
@@ -108,6 +110,7 @@ export default function CatalogEngineDashboard() {
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [showNewAccountModal, setShowNewAccountModal] = useState(false);
   const [showPriceCleanupModal, setShowPriceCleanupModal] = useState(false);
+  const [showStockCleanupModal, setShowStockCleanupModal] = useState(false);
   const [showUserModal, setShowUserModal] = useState(false);
   const [currentUser, setCurrentUser] = useState<SessionUser | null>(null);
 
@@ -417,6 +420,16 @@ export default function CatalogEngineDashboard() {
           >
             <Trash2 className="h-3.5 w-3.5 text-rose-400" />
             <span className="hidden sm:inline">Limpieza de Precios</span>
+          </button>
+
+          {/* Stock Cleanup Button */}
+          <button
+            onClick={() => setShowStockCleanupModal(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-amber-500/40 bg-amber-950/20 text-amber-300 hover:bg-amber-900/30 hover:border-amber-500/60 transition-all text-xs font-semibold shadow-sm cursor-pointer"
+            title="Limpieza de inventario (Stock a 0)"
+          >
+            <PackageX className="h-3.5 w-3.5 text-amber-400" />
+            <span className="hidden sm:inline">Limpieza de Stock</span>
           </button>
 
           {/* User Management Button (Solo Admin) */}
@@ -891,6 +904,13 @@ export default function CatalogEngineDashboard() {
       <PriceCleanupModal
         isOpen={showPriceCleanupModal}
         onClose={() => setShowPriceCleanupModal(false)}
+        selectedAccount={selectedAccountObj}
+      />
+
+      {/* Stock Cleanup Modal */}
+      <StockCleanupModal
+        isOpen={showStockCleanupModal}
+        onClose={() => setShowStockCleanupModal(false)}
         selectedAccount={selectedAccountObj}
       />
 

@@ -42,6 +42,9 @@ export default function PriceCleanupModal({
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
 
+  // Tipo de Limpieza: 'tables' (precios fijos por tabla) vs 'root' (precio de raíz: Base + Listas)
+  const [cleanupType, setCleanupType] = useState<'tables' | 'root'>('tables');
+
   // Modo: 'auto' (todo el catálogo) vs 'file' (Excel)
   const [mode, setMode] = useState<'auto' | 'file'>('auto');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -132,12 +135,12 @@ export default function PriceCleanupModal({
 
   const handleStartCleanup = async () => {
     if (!selectedAccount) return;
-    if (selectedTables.size === 0 && mode === 'auto') {
+    if (cleanupType === 'tables' && selectedTables.size === 0 && mode === 'auto') {
       alert('Debes seleccionar al menos una tabla de precios para limpiar.');
       return;
     }
     if (mode === 'file' && !selectedFile) {
-      alert('Debes adjuntar un archivo Excel con las columnas [SKU ID, tabla de precios].');
+      alert('Debes adjuntar un archivo Excel con la columna de SKU ID.');
       return;
     }
 
@@ -145,15 +148,28 @@ export default function PriceCleanupModal({
     setLogs([]);
     setMetrics({ processed: 0, deleted: 0, errors: 0, skipped: 0 });
 
-    addLog('info', `Iniciando proceso: LIMPIEZA DE PRECIOS (${isDryRun ? 'SIMULACIÓN' : 'PRODUCCIÓN'})`);
-    addLog('info', `Cuenta: ${selectedAccount.account_name} | Modo: ${mode === 'auto' ? 'Catálogo Completo' : 'Por Archivo'}`);
-    addLog('info', `Tablas seleccionadas: [${Array.from(selectedTables).join(', ')}]`);
+    addLog(
+      'info',
+      `Iniciando proceso: ${
+        cleanupType === 'root' ? 'ELIMINACIÓN TOTAL DE PRECIOS DE RAÍZ (Base + Listas)' : 'LIMPIEZA DE PRECIOS FIJOS'
+      } (${isDryRun ? 'SIMULACIÓN' : 'PRODUCCIÓN'})`
+    );
+    addLog(
+      'info',
+      `Cuenta: ${selectedAccount.account_name} | Modo: ${mode === 'auto' ? 'Catálogo Completo' : 'Por Archivo'}`
+    );
+    if (cleanupType === 'tables') {
+      addLog('info', `Tablas seleccionadas: [${Array.from(selectedTables).join(', ')}]`);
+    } else {
+      addLog('warning', `⚠️ Operación de raíz: Se eliminará el Precio Base y todas las listas fijas para los SKUs procesados.`);
+    }
 
     try {
       const formData = new FormData();
       formData.append('accountId', selectedAccount.id);
-      formData.append('tables', Array.from(selectedTables).join(','));
+      formData.append('tables', cleanupType === 'tables' ? Array.from(selectedTables).join(',') : '');
       formData.append('dryRun', isDryRun ? 'true' : 'false');
+      formData.append('deleteRoot', cleanupType === 'root' ? 'true' : 'false');
       if (mode === 'file' && selectedFile) {
         formData.append('file', selectedFile);
       }
@@ -229,18 +245,30 @@ export default function PriceCleanupModal({
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
           <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-rose-600 to-amber-500 flex items-center justify-center text-white shadow-md shadow-rose-950/50">
+            <div className={`h-9 w-9 rounded-xl flex items-center justify-center text-white shadow-md ${
+              cleanupType === 'root'
+                ? 'bg-gradient-to-tr from-red-600 to-rose-500 shadow-red-950/50'
+                : 'bg-gradient-to-tr from-rose-600 to-amber-500 shadow-rose-950/50'
+            }`}>
               <Trash2 className="h-5 w-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="font-bold text-base text-slate-100">Full Clean Up: Listas de Precios</h3>
-                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-rose-950/60 text-rose-400 border border-rose-800/60">
-                  Fixed Prices Purge
+                <h3 className="font-bold text-base text-slate-100">
+                  {cleanupType === 'root' ? 'Eliminación de Precios de Raíz' : 'Full Clean Up: Listas de Precios'}
+                </h3>
+                <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded-full border ${
+                  cleanupType === 'root'
+                    ? 'bg-red-950/70 text-red-300 border-red-700/70'
+                    : 'bg-rose-950/60 text-rose-400 border border-rose-800/60'
+                }`}>
+                  {cleanupType === 'root' ? 'Root Price Purge' : 'Fixed Prices Purge'}
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Eliminación selectiva o total de listas de precios residuales en{' '}
+                {cleanupType === 'root'
+                  ? 'Eliminación total del precio (Base + Precios Fijos) en '
+                  : 'Eliminación de precios fijos en tablas específicas en '}
                 <span className="font-semibold text-rose-300">{selectedAccount?.account_name || 'cuenta VTEX'}</span>
               </p>
             </div>
@@ -256,29 +284,92 @@ export default function PriceCleanupModal({
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-5 text-sm">
-          {/* Alerta explicativa */}
-          <div className="bg-amber-950/20 border border-amber-800/40 rounded-xl p-3.5 flex items-start gap-3 text-xs text-amber-200/90">
-            <Info className="h-4 w-4 text-amber-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="font-medium text-amber-300">Arquitectura de Precios en VTEX:</p>
-              <p className="mt-0.5 text-slate-400 leading-relaxed">
-                Al ejecutar esta limpieza, se eliminan todos los precios fijos asociados a los SKUs (<code className="text-amber-300 font-mono">DELETE /pricing/prices/{'{sku}'}/fixed/{'{tabla}'}</code>). Al quedar en <b>0 precios</b>, la tabla queda <b>completamente inerte y ya no altera los precios</b> de la tienda ni en vitrinas ni en checkout.
-              </p>
-              <p className="mt-1 text-slate-500 text-[11px]">
-                ℹ️ Por políticas internas de seguridad de VTEX, el identificador/nombre de la tabla permanece en el listado del Admin hasta que se solicite su eliminación definitiva a <b>Soporte VTEX</b> (requiere que la tabla esté previamente vaciada, tal como lo hace este módulo).
-              </p>
+          {/* Selector de Tipo de Limpieza */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-slate-300">Tipo de Limpieza a Ejecutar:</label>
+            <div className="grid grid-cols-2 gap-3 bg-slate-950/80 p-1.5 rounded-xl border border-slate-800">
+              <button
+                type="button"
+                onClick={() => setCleanupType('tables')}
+                disabled={isRunning}
+                className={`flex items-start gap-3 p-3 rounded-lg text-left transition-all cursor-pointer ${
+                  cleanupType === 'tables'
+                    ? 'bg-rose-950/50 border border-rose-500/50 text-rose-100 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+                }`}
+              >
+                <Layers className="h-5 w-5 text-rose-400 mt-0.5 flex-shrink-0" />
+                <div>
+                  <div className="font-semibold text-xs text-slate-200">Precios Fijos por Tabla</div>
+                  <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                    Elimina precios asignados a tablas específicas (Cyber, B2B, etc.). Mantiene intacto el Precio Base.
+                  </p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCleanupType('root')}
+                disabled={isRunning}
+                className={`flex items-start gap-3 p-3 rounded-lg text-left transition-all cursor-pointer ${
+                  cleanupType === 'root'
+                    ? 'bg-red-950/60 border border-red-500/70 text-red-100 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+                }`}
+              >
+                <Trash2 className="h-5 w-5 text-red-400 mt-0.5 flex-shrink-0" />
+                <div>
+                  <div className="font-semibold text-xs text-red-300 flex items-center gap-1.5">
+                    Eliminar Precio DE RAÍZ
+                    <span className="text-[9px] uppercase px-1.5 py-0.2 rounded bg-red-900/80 text-red-200 font-mono">Total</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                    Elimina Precio Base y todas las listas fijas (<code className="text-red-300 font-mono text-[10px]">DELETE /pricing/prices/{'{sku}'}</code>). Deja el SKU &quot;Sin Precio&quot;.
+                  </p>
+                </div>
+              </button>
             </div>
           </div>
 
-          {/* Selector de Modo */}
+          {/* Alerta explicativa según el tipo */}
+          {cleanupType === 'tables' ? (
+            <div className="bg-amber-950/20 border border-amber-800/40 rounded-xl p-3.5 flex items-start gap-3 text-xs text-amber-200/90">
+              <Info className="h-4 w-4 text-amber-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-medium text-amber-300">Arquitectura de Precios Fijos en VTEX:</p>
+                <p className="mt-0.5 text-slate-400 leading-relaxed">
+                  Al ejecutar esta limpieza, se eliminan todos los precios fijos asociados a los SKUs en las tablas seleccionadas (<code className="text-amber-300 font-mono">DELETE /pricing/prices/{'{sku}'}/fixed/{'{tabla}'}</code>). Al quedar en <b>0 precios</b>, la tabla queda inerte y ya no altera los precios.
+                </p>
+                <p className="mt-1 text-slate-500 text-[11px]">
+                  ℹ️ El Precio Base del SKU se mantiene intacto. Si deseas remover todo precio del producto, utiliza el modo <b>Eliminar Precio DE RAÍZ</b>.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-red-950/30 border border-red-800/50 rounded-xl p-3.5 flex items-start gap-3 text-xs text-red-200/90">
+              <AlertTriangle className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-red-300">⚠️ Eliminación Definitiva de Precios (Root Purge):</p>
+                <p className="mt-0.5 text-slate-300 leading-relaxed">
+                  Se enviará la petición <code className="text-red-300 font-mono bg-red-950/60 px-1 py-0.5 rounded">DELETE /pricing/prices/{'{skuId}'}</code> a la API de Precios de VTEX.
+                  Esto elimina de raíz el <b>Precio Base</b> (<code className="font-mono text-slate-300">basePrice</code>, <code className="font-mono text-slate-300">costPrice</code>, <code className="font-mono text-slate-300">listPrice</code>, <code className="font-mono text-slate-300">markup</code>) y <b>todos los precios fijos de todas las políticas comerciales</b>.
+                </p>
+                <p className="mt-1 text-red-400/90 font-medium">
+                  En el administrador de VTEX, los SKUs quedarán en estado <b>&quot;Sin Precio&quot;</b>.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Selector de Modo de Alcance */}
           <div className="grid grid-cols-2 gap-3 bg-slate-950/60 p-1.5 rounded-xl border border-slate-800">
             <button
               type="button"
               onClick={() => setMode('auto')}
-              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg font-medium text-xs transition-all ${
+              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg font-medium text-xs transition-all cursor-pointer ${
                 mode === 'auto'
                   ? 'bg-rose-950/50 border border-rose-500/50 text-rose-200 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
               }`}
             >
               <Layers className="h-4 w-4" />
@@ -287,10 +378,10 @@ export default function PriceCleanupModal({
             <button
               type="button"
               onClick={() => setMode('file')}
-              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg font-medium text-xs transition-all ${
+              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg font-medium text-xs transition-all cursor-pointer ${
                 mode === 'file'
                   ? 'bg-rose-950/50 border border-rose-500/50 text-rose-200 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
               }`}
             >
               <FileSpreadsheet className="h-4 w-4" />
@@ -305,18 +396,22 @@ export default function PriceCleanupModal({
                 <div>
                   <span className="text-xs font-semibold text-slate-200">Planilla personalizada de SKUs</span>
                   <p className="text-[11px] text-slate-400">
-                    Sube un archivo Excel para eliminar únicamente los precios fijos indicados.
+                    {cleanupType === 'root'
+                      ? 'Sube un archivo Excel para eliminar el precio de raíz únicamente a los SKUs listados.'
+                      : 'Sube un archivo Excel para eliminar únicamente los precios fijos indicados.'}
                   </p>
                 </div>
-                <a
-                  href="/templates/Planilla_de_eliminacion_de_precios_por_SKU.xlsx"
-                  download="Planilla_de_eliminacion_de_precios_por_SKU.xlsx"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 hover:border-rose-500/80 transition-all shadow-sm cursor-pointer"
-                  title="Descargar plantilla de Excel de ejemplo"
-                >
-                  <Download className="h-3.5 w-3.5 text-rose-400" />
-                  <span>Descargar Template Excel</span>
-                </a>
+                {cleanupType === 'tables' && (
+                  <a
+                    href="/templates/Planilla_de_eliminacion_de_precios_por_SKU.xlsx"
+                    download="Planilla_de_eliminacion_de_precios_por_SKU.xlsx"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 hover:border-rose-500/80 transition-all shadow-sm cursor-pointer"
+                    title="Descargar plantilla de Excel de ejemplo"
+                  >
+                    <Download className="h-3.5 w-3.5 text-rose-400" />
+                    <span>Descargar Template Excel</span>
+                  </a>
+                )}
               </div>
 
               <div className="border-2 border-dashed border-slate-700 hover:border-rose-500/50 bg-slate-950/40 rounded-xl p-4 transition-all">
@@ -326,7 +421,11 @@ export default function PriceCleanupModal({
                     {selectedFile ? selectedFile.name : 'Haz clic para seleccionar el Excel de precios'}
                   </span>
                   <span className="text-[11px] text-slate-500 mt-1">
-                    Columnas requeridas: <b>SKU ID</b> y opcionalmente <b>tabla de precios</b>
+                    {cleanupType === 'root' ? (
+                      <>Columna requerida: <b>SKU ID</b> (o ID SKU)</>
+                    ) : (
+                      <>Columnas requeridas: <b>SKU ID</b> y opcionalmente <b>tabla de precios</b></>
+                    )}
                   </span>
                   <input
                     type="file"
@@ -357,107 +456,119 @@ export default function PriceCleanupModal({
             </div>
           )}
 
-          {/* Sección de Tablas de Precios Descubiertas */}
-          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                  Listas de Precios detectadas en VTEX:
-                </span>
-                {loadingTables && (
-                  <span className="text-[11px] text-slate-500 flex items-center gap-1">
-                    <RefreshCw className="h-3 w-3 animate-spin" /> Consultando...
+          {/* Sección de Tablas de Precios Descubiertas (Solo si es por tablas) */}
+          {cleanupType === 'tables' ? (
+            <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    Listas de Precios detectadas en VTEX:
                   </span>
-                )}
+                  {loadingTables && (
+                    <span className="text-[11px] text-slate-500 flex items-center gap-1">
+                      <RefreshCw className="h-3 w-3 animate-spin" /> Consultando...
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={fetchPriceTables}
+                    disabled={loadingTables || isRunning}
+                    className="text-xs text-slate-400 hover:text-slate-200 p-1 hover:bg-slate-800 rounded transition-colors"
+                    title="Recargar tablas"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${loadingTables ? 'animate-spin' : ''}`} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={selectAllTables}
+                    disabled={loadingTables || tables.length === 0}
+                    className="text-[11px] text-rose-400 hover:text-rose-300 font-semibold px-2 py-0.5 rounded bg-rose-950/30 hover:bg-rose-950/60 border border-rose-800/40 transition-colors"
+                  >
+                    Seleccionar todas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={deselectAllTables}
+                    disabled={loadingTables || tables.length === 0}
+                    className="text-[11px] text-slate-400 hover:text-slate-300 px-2 py-0.5 rounded hover:bg-slate-800 transition-colors"
+                  >
+                    Deseleccionar todas
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={fetchPriceTables}
-                  disabled={loadingTables || isRunning}
-                  className="text-xs text-slate-400 hover:text-slate-200 p-1 hover:bg-slate-800 rounded transition-colors"
-                  title="Recargar tablas"
-                >
-                  <RefreshCw className={`h-3.5 w-3.5 ${loadingTables ? 'animate-spin' : ''}`} />
-                </button>
-                <button
-                  type="button"
-                  onClick={selectAllTables}
-                  disabled={loadingTables || tables.length === 0}
-                  className="text-[11px] text-rose-400 hover:text-rose-300 font-semibold px-2 py-0.5 rounded bg-rose-950/30 hover:bg-rose-950/60 border border-rose-800/40 transition-colors"
-                >
-                  Seleccionar todas
-                </button>
-                <button
-                  type="button"
-                  onClick={deselectAllTables}
-                  disabled={loadingTables || tables.length === 0}
-                  className="text-[11px] text-slate-400 hover:text-slate-300 px-2 py-0.5 rounded hover:bg-slate-800 transition-colors"
-                >
-                  Deseleccionar todas
-                </button>
+
+              {fetchError ? (
+                <div className="p-3 bg-red-950/30 border border-red-800/50 rounded-lg text-xs text-red-300 flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 text-red-400 flex-shrink-0" />
+                  <span>{fetchError}</span>
+                </div>
+              ) : tables.length === 0 && !loadingTables ? (
+                <p className="text-xs text-slate-500 py-3 text-center">
+                  No se encontraron listas de precios registradas en esta cuenta.
+                </p>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {tables.map((tableId) => {
+                    const isChecked = selectedTables.has(tableId);
+                    const isBase = tableId === '1';
+
+                    return (
+                      <div
+                        key={tableId}
+                        onClick={() => toggleTable(tableId)}
+                        className={`cursor-pointer rounded-lg p-2.5 border transition-all flex items-center justify-between ${
+                          isChecked
+                            ? isBase
+                              ? 'bg-amber-950/40 border-amber-500/70 text-amber-200 shadow-sm'
+                              : 'bg-rose-950/40 border-rose-500/70 text-rose-100 shadow-sm'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 overflow-hidden">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}} // controlado por onClick del padre
+                            className="rounded border-slate-700 text-rose-600 focus:ring-rose-500/40 bg-slate-800 cursor-pointer"
+                          />
+                          <span className="font-mono text-xs font-semibold truncate">{tableId}</span>
+                        </div>
+                        {isBase && (
+                          <span
+                            className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-300 border border-amber-700/50 flex items-center gap-1"
+                            title="Política comercial principal de la tienda"
+                          >
+                            <ShieldAlert className="h-2.5 w-2.5" /> Base
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {hasBasePolicySelected && (
+                <div className="mt-3 p-2.5 rounded-lg bg-amber-950/30 border border-amber-800/60 flex items-center gap-2 text-xs text-amber-300">
+                  <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0" />
+                  <span>
+                    <b>¡Cuidado!</b> Has seleccionado la tabla <code>&quot;1&quot;</code> (Política Principal). Al limpiarla se borrarán los precios base fijos de todos los productos de tu tienda.
+                  </span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 flex items-center gap-3">
+              <CheckCircle2 className="h-5 w-5 text-emerald-400 flex-shrink-0" />
+              <div>
+                <span className="text-xs font-bold text-slate-200">No se requiere selección de tablas de precios</span>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  La eliminación de raíz borra automáticamente todas las listas asociadas (políticas comerciales) y el Precio Base simultáneamente para cada SKU procesado.
+                </p>
               </div>
             </div>
-
-            {fetchError ? (
-              <div className="p-3 bg-red-950/30 border border-red-800/50 rounded-lg text-xs text-red-300 flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 text-red-400 flex-shrink-0" />
-                <span>{fetchError}</span>
-              </div>
-            ) : tables.length === 0 && !loadingTables ? (
-              <p className="text-xs text-slate-500 py-3 text-center">
-                No se encontraron listas de precios registradas en esta cuenta.
-              </p>
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                {tables.map((tableId) => {
-                  const isChecked = selectedTables.has(tableId);
-                  const isBase = tableId === '1';
-
-                  return (
-                    <div
-                      key={tableId}
-                      onClick={() => toggleTable(tableId)}
-                      className={`cursor-pointer rounded-lg p-2.5 border transition-all flex items-center justify-between ${
-                        isChecked
-                          ? isBase
-                            ? 'bg-amber-950/40 border-amber-500/70 text-amber-200 shadow-sm'
-                            : 'bg-rose-950/40 border-rose-500/70 text-rose-100 shadow-sm'
-                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 overflow-hidden">
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => {}} // controlado por onClick del padre
-                          className="rounded border-slate-700 text-rose-600 focus:ring-rose-500/40 bg-slate-800 cursor-pointer"
-                        />
-                        <span className="font-mono text-xs font-semibold truncate">{tableId}</span>
-                      </div>
-                      {isBase && (
-                        <span
-                          className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-300 border border-amber-700/50 flex items-center gap-1"
-                          title="Política comercial principal de la tienda"
-                        >
-                          <ShieldAlert className="h-2.5 w-2.5" /> Base
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {hasBasePolicySelected && (
-              <div className="mt-3 p-2.5 rounded-lg bg-amber-950/30 border border-amber-800/60 flex items-center gap-2 text-xs text-amber-300">
-                <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0" />
-                <span>
-                  <b>¡Cuidado!</b> Has seleccionado la tabla <code>&quot;1&quot;</code> (Política Principal). Al limpiarla se borrarán los precios base fijos de todos los productos de tu tienda.
-                </span>
-              </div>
-            )}
-          </div>
+          )}
 
           {/* Toggle Dry-Run vs Producción */}
           <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-950/80 border border-slate-800">
@@ -556,7 +667,12 @@ export default function PriceCleanupModal({
         {/* Modal Footer */}
         <div className="px-6 py-4 border-t border-slate-800 bg-slate-950/70 flex items-center justify-between">
           <div className="text-xs text-slate-400">
-            {selectedTables.size > 0 ? (
+            {cleanupType === 'root' ? (
+              <span className="flex items-center gap-1.5 text-red-300 font-medium">
+                <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                Modo: <b className="text-red-300">Eliminación Total de Raíz (Base + Listas)</b>
+              </span>
+            ) : selectedTables.size > 0 ? (
               <span>
                 <b>{selectedTables.size}</b> tabla(s) seleccionada(s) para limpieza.
               </span>
@@ -576,10 +692,16 @@ export default function PriceCleanupModal({
             <button
               type="button"
               onClick={handleStartCleanup}
-              disabled={isRunning || (selectedTables.size === 0 && mode === 'auto')}
+              disabled={
+                isRunning ||
+                (cleanupType === 'tables' && selectedTables.size === 0 && mode === 'auto') ||
+                (mode === 'file' && !selectedFile)
+              }
               className={`flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                 isDryRun
                   ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-950/40'
+                  : cleanupType === 'root'
+                  ? 'bg-red-600 hover:bg-red-500 text-white shadow-red-950/50'
                   : 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-950/50'
               }`}
             >
@@ -591,7 +713,15 @@ export default function PriceCleanupModal({
               ) : (
                 <>
                   <Trash2 className="h-4 w-4" />
-                  <span>{isDryRun ? 'Iniciar Simulación (Dry-Run)' : 'Ejecutar Eliminación en VTEX'}</span>
+                  <span>
+                    {isDryRun
+                      ? cleanupType === 'root'
+                        ? 'Simular Eliminación de Raíz (Dry-Run)'
+                        : 'Iniciar Simulación (Dry-Run)'
+                      : cleanupType === 'root'
+                      ? 'Eliminar Precios de Raíz (Definitivo)'
+                      : 'Ejecutar Eliminación en VTEX'}
+                  </span>
                 </>
               )}
             </button>

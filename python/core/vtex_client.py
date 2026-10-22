@@ -36,6 +36,8 @@ class VtexClient:
             url = endpoint
             
         headers = {**self.headers, **kwargs.pop("headers", {})}
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 25
         max_retries = 3
         
         for attempt in range(max_retries):

@@ -5,7 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import { supabaseAdmin } from '@/lib/supabase';
 
-export const maxDuration = 300;
+export const maxDuration = 900;
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,6 +13,7 @@ export async function POST(req: NextRequest) {
     const accountId = formData.get('accountId') as string;
     const tablesRaw = formData.get('tables') as string;
     const isDryRun = formData.get('dryRun') === 'true';
+    const deleteRoot = formData.get('deleteRoot') === 'true';
     const file = formData.get('file') as File | null;
 
     if (!accountId) {
@@ -46,6 +47,7 @@ export async function POST(req: NextRequest) {
       outgoing.append('environment', account.environment || 'vtexcommercestable');
       outgoing.append('tables', tablesRaw || '');
       outgoing.append('dry_run', isDryRun ? 'true' : 'false');
+      outgoing.append('delete_root', deleteRoot ? 'true' : 'false');
       if (file) {
         outgoing.append('file', file, file.name);
       }
@@ -89,7 +91,18 @@ export async function POST(req: NextRequest) {
       start(controller) {
         let isClosed = false;
 
+        const keepAliveInterval = setInterval(() => {
+          if (!isClosed) {
+            try {
+              controller.enqueue(new TextEncoder().encode(': keepalive\n\n'));
+            } catch {
+              clearInterval(keepAliveInterval);
+            }
+          }
+        }, 15000);
+
         const safeClose = () => {
+          clearInterval(keepAliveInterval);
           if (!isClosed) {
             isClosed = true;
             try {
@@ -104,6 +117,7 @@ export async function POST(req: NextRequest) {
             controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
           } catch {
             isClosed = true;
+            clearInterval(keepAliveInterval);
             if (pythonProcess && !pythonProcess.killed) {
               try {
                 pythonProcess.kill();
@@ -130,6 +144,10 @@ export async function POST(req: NextRequest) {
 
         if (tablesRaw) {
           pythonArgs.push('--tables', tablesRaw);
+        }
+
+        if (deleteRoot) {
+          pythonArgs.push('--delete-root');
         }
 
         if (tempFilePath) {

@@ -1,9 +1,27 @@
 import os
 import time
+import urllib.parse
+from datetime import datetime, timedelta
 import pandas as pd
-from typing import Dict, Any, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any, List, Optional, Set
 from core.vtex_client import VtexClient
 from core.events import emit_log, emit_progress, emit_summary
+
+def find_collection_by_name(client: VtexClient, name: str) -> Optional[int]:
+    """Busca si ya existe una colección con este nombre exacto en VTEX."""
+    try:
+        encoded = urllib.parse.quote(name.strip())
+        res = client.get(f"/api/catalog_system/pvt/collection/search/{encoded}?pageSize=20")
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("items", [])
+            for item in items:
+                if str(item.get("name", "")).strip().lower() == name.strip().lower():
+                    return int(item.get("id"))
+    except Exception:
+        pass
+    return None
 
 def get_or_create_subcollection(client: VtexClient, collection_id: int, dry_run: bool) -> Optional[int]:
     """Obtiene el ID de subcolección principal o crea una nueva si no existe."""
@@ -78,7 +96,7 @@ def parse_id_list(val) -> List[int]:
             continue
     return res
 
-def process_collections(client: VtexClient, file_path: str, dry_run: bool = False):
+def process_collections(client: VtexClient, file_path: str, dry_run: bool = False, max_workers: int = 8):
     """
     Crea o actualiza colecciones dinámicas y asocia SKUs/Productos a su subcolección.
     Agrupa automáticamente los ítems por colección para evitar creaciones duplicadas.
@@ -170,6 +188,10 @@ def process_collections(client: VtexClient, file_path: str, dry_run: bool = Fals
         col_num = 0
         total_cols = len(collections_map)
 
+        now = datetime.now()
+        default_date_from = now.strftime("%Y-%m-%dT00:00:00")
+        default_date_to = (now + timedelta(days=3650)).strftime("%Y-%m-%dT00:00:00")
+
         for col_name, c_data in collections_map.items():
             col_num += 1
             num_skus = len(c_data["sku_ids"])
@@ -183,59 +205,102 @@ def process_collections(client: VtexClient, file_path: str, dry_run: bool = Fals
                 continue
 
             try:
-                # 1. Crear o actualizar la Colección
+                # 1. Determinar si la colección ya existe (por ID explícito o por Nombre exacto)
+                existing_col_id = c_data["id"]
+                if not existing_col_id:
+                    existing_col_id = find_collection_by_name(client, col_name)
+
+                # Construir payload completo requerido por la API de VTEX
                 payload = {
                     "Name": col_name,
+                    "Description": c_data["description"] if c_data["description"] else col_name,
                     "Searchable": c_data["searchable"],
-                    "Highlight": c_data["highlight"]
+                    "Highlight": c_data["highlight"],
+                    "DateFrom": default_date_from,
+                    "DateTo": default_date_to
                 }
-                if c_data["id"]:
-                    payload["Id"] = c_data["id"]
 
-                res = client.post("/api/catalog/pvt/collection", json=payload)
-                if res.status_code not in [200, 201]:
-                    emit_log("error", f"{col_desc}: Error creando colección ({res.status_code}): {res.text[:100]}")
-                    error_count += 1
-                    continue
+                actual_col_id = None
+                action_label = ""
 
-                res_json = res.json() if res.text else {}
-                actual_col_id = res_json.get("Id") or c_data["id"]
+                if existing_col_id:
+                    # Actualizar colección existente
+                    payload["Id"] = existing_col_id
+                    put_res = client.put(f"/api/catalog/pvt/collection/{existing_col_id}", json=payload)
+                    if put_res.status_code in [200, 201]:
+                        actual_col_id = existing_col_id
+                        action_label = "Actualizada"
+                        updated_count += 1
+                    else:
+                        emit_log("warning", f"{col_desc}: Falló actualización de colección ID {existing_col_id} ({put_res.status_code}), intentando creación...")
+
+                if not actual_col_id:
+                    # Crear nueva colección
+                    res = client.post("/api/catalog/pvt/collection", json=payload)
+                    if res.status_code not in [200, 201]:
+                        emit_log("error", f"{col_desc}: Error creando colección ({res.status_code}): {res.text[:120]}")
+                        error_count += 1
+                        continue
+
+                    res_json = res.json() if res.text else {}
+                    actual_col_id = res_json.get("Id")
+                    action_label = "Creada"
+                    created_count += 1
+
                 if not actual_col_id:
                     emit_log("error", f"{col_desc}: VTEX no retornó ID de colección.")
                     error_count += 1
                     continue
 
-                created_count += 1
-
                 # 2. Obtener o crear la Subcolección principal
                 subcol_id = get_or_create_subcollection(client, actual_col_id, dry_run=False)
                 if not subcol_id:
-                    emit_log("warning", f"{col_desc}: Creada (ID: {actual_col_id}), pero no se pudo obtener subcolección para asociar ítems.")
+                    emit_log("warning", f"{col_desc}: {action_label} (ID: {actual_col_id}), pero no se pudo obtener subcolección para asociar ítems.")
                     continue
 
-                # 3. Consolidar todos los SKUs (incluyendo todos los SKUs de cada producto especificado)
+                # 3. Consolidar todos los SKUs
                 all_target_skus = set(c_data["sku_ids"])
 
-                for p_id in c_data["prod_ids"]:
-                    try:
-                        p_res = client.get(f"/api/catalog_system/pvt/sku/stockkeepingunitByProductId/{p_id}")
-                        if p_res.status_code == 200:
-                            skus_list = p_res.json()
-                            if isinstance(skus_list, list):
-                                for s in skus_list:
-                                    s_id = s.get("Id") or s.get("id")
-                                    if s_id:
-                                        all_target_skus.add(int(s_id))
-                    except Exception:
-                        pass
+                # Si no se dieron SKUs directos pero sí productos, consultar en paralelo
+                if len(all_target_skus) == 0 and c_data["prod_ids"]:
+                    emit_log("info", f"{col_desc}: Consultando SKUs para {len(c_data['prod_ids'])} productos en paralelo...")
+                    def fetch_product_skus(p_id):
+                        try:
+                            p_res = client.get(f"/api/catalog_system/pvt/sku/stockkeepingunitByProductId/{p_id}")
+                            if p_res.status_code == 200:
+                                skus_list = p_res.json()
+                                if isinstance(skus_list, list):
+                                    return [int(s.get("Id") or s.get("id")) for s in skus_list if s.get("Id") or s.get("id")]
+                        except Exception:
+                            pass
+                        return []
 
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = [executor.submit(fetch_product_skus, p_id) for p_id in c_data["prod_ids"]]
+                        for future in as_completed(futures):
+                            for s_id in future.result():
+                                all_target_skus.add(s_id)
+
+                # 4. Vincular SKUs concurrentemente a la subcolección
                 items_linked = 0
-                for target_sku in all_target_skus:
-                    ok = associate_sku_to_subcollection(client, subcol_id, target_sku, dry_run=False)
-                    if ok:
-                        items_linked += 1
+                items_total = len(all_target_skus)
 
-                emit_progress(col_num, total_cols, col_desc, f"-> ✅ Creada (ID: {actual_col_id}, {items_linked}/{len(all_target_skus)} SKUs vinculados)")
+                if items_total > 0:
+                    def link_sku_worker(s_id: int):
+                        return associate_sku_to_subcollection(client, subcol_id, s_id, dry_run=False)
+
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        sku_futures = {executor.submit(link_sku_worker, s_id): s_id for s_id in all_target_skus}
+                        for future in as_completed(sku_futures):
+                            if future.result():
+                                items_linked += 1
+
+                emit_progress(
+                    col_num,
+                    total_cols,
+                    col_desc,
+                    f"-> ✅ {action_label} (ID: {actual_col_id}, {items_linked}/{items_total} SKUs vinculados)"
+                )
 
             except Exception as e:
                 emit_log("error", f"{col_desc}: Excepción al procesar: {str(e)}")
