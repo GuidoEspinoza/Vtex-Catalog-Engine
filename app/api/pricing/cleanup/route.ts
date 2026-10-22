@@ -5,7 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import { supabaseAdmin } from '@/lib/supabase';
 
-export const maxDuration = 900;
+export const maxDuration = 300; // Máximo permitido en Vercel Plan Hobby (5 minutos)
 
 export async function POST(req: NextRequest) {
   try {

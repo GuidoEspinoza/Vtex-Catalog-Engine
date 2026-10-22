@@ -6,7 +6,7 @@ import os from 'os';
 import { supabaseAdmin } from '@/lib/supabase';
 
 
-export const maxDuration = 900; // Permitir hasta 15 minutos en streaming
+export const maxDuration = 300; // Permitir hasta 5 minutos en streaming (máximo plan Hobby)
 
 export async function POST(req: NextRequest) {
   try {
