@@ -22,21 +22,24 @@ from modules.product_specs import process_product_specs
 from modules.collections import process_collections
 from modules.pricing_cleanup import process_pricing_cleanup
 from modules.stock_cleanup import process_stock_cleanup
+from modules.images_cleanup import process_images_cleanup
 
 def main():
     parser = argparse.ArgumentParser(description="VTEX Catalog Engine Master Runner")
     parser.add_argument("--entity", required=True, choices=[
-        "categories", "brands", "specifications", "spec_values", "product_specs", "collections", "pricing_cleanup", "stock_cleanup"
+        "categories", "brands", "specifications", "spec_values", "product_specs", "collections", "pricing_cleanup", "stock_cleanup", "images_cleanup"
     ])
     parser.add_argument("--account", required=True, help="Nombre de cuenta VTEX")
     parser.add_argument("--app-key", required=True, help="X-VTEX-API-AppKey")
     parser.add_argument("--app-token", required=True, help="X-VTEX-API-AppToken")
     parser.add_argument("--environment", default="vtexcommercestable", help="Ambiente VTEX")
-    parser.add_argument("--file", required=False, default=None, help="Ruta al archivo XLSX o CSV (opcional para pricing_cleanup y stock_cleanup)")
+    parser.add_argument("--file", required=False, default=None, help="Ruta al archivo XLSX, CSV o TXT")
     parser.add_argument("--tables", required=False, default=None, help="Tablas de precios separadas por coma (ej. cyber,organizacion)")
     parser.add_argument("--warehouses", required=False, default=None, help="IDs de almacenes/bodegas separados por coma (ej. 127d9f7,BSI)")
+    parser.add_argument("--skus", required=False, default=None, help="SKU IDs separados por coma (ej. 1024,1852)")
     parser.add_argument("--dry-run", action="store_true", default=False, help="Ejecutar en modo simulación sin mutar datos")
     parser.add_argument("--delete-root", action="store_true", default=False, help="Eliminar de raíz el precio (Precio Base + Precios Fijos) del SKU")
+    parser.add_argument("--delete-all", action="store_true", default=False, help="Eliminar todas las imágenes de los SKUs (Purga total)")
 
     args = parser.parse_args()
 
@@ -86,6 +89,21 @@ def main():
             sys.exit(0)
         except Exception as e:
             emit_log("error", f"Excepción fatal en stock_cleanup: {str(e)}")
+            sys.exit(1)
+
+    if args.entity == "images_cleanup":
+        try:
+            process_images_cleanup(
+                client=client,
+                file_path=args.file,
+                skus_raw=args.skus,
+                delete_all=args.delete_all,
+                dry_run=args.dry_run
+            )
+            emit_log("success", f"Completado exitosamente: {args.entity} ({mode_label})")
+            sys.exit(0)
+        except Exception as e:
+            emit_log("error", f"Excepción fatal en images_cleanup: {str(e)}")
             sys.exit(1)
 
     # Validar que otras entidades requieran archivo

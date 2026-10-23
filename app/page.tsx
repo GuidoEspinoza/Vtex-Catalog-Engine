@@ -26,11 +26,13 @@ import {
   Download,
   Users,
   PackageX,
+  Images,
 } from 'lucide-react';
 import { VtexAccount } from '@/types/database';
 import { SessionUser } from '@/lib/auth';
 import PriceCleanupModal from '@/components/PriceCleanupModal';
 import StockCleanupModal from '@/components/StockCleanupModal';
+import ImagesCleanupModal from '@/components/ImagesCleanupModal';
 import UserManagementModal from '@/components/UserManagementModal';
 
 interface LogEntry {
@@ -111,6 +113,7 @@ export default function CatalogEngineDashboard() {
   const [showNewAccountModal, setShowNewAccountModal] = useState(false);
   const [showPriceCleanupModal, setShowPriceCleanupModal] = useState(false);
   const [showStockCleanupModal, setShowStockCleanupModal] = useState(false);
+  const [showImagesCleanupModal, setShowImagesCleanupModal] = useState(false);
   const [showUserModal, setShowUserModal] = useState(false);
   const [currentUser, setCurrentUser] = useState<SessionUser | null>(null);
 
@@ -430,6 +433,16 @@ export default function CatalogEngineDashboard() {
           >
             <PackageX className="h-3.5 w-3.5 text-amber-400" />
             <span className="hidden sm:inline">Limpieza de Stock</span>
+          </button>
+
+          {/* Images Cleanup Button */}
+          <button
+            onClick={() => setShowImagesCleanupModal(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-purple-500/40 bg-purple-950/20 text-purple-300 hover:bg-purple-900/30 hover:border-purple-500/60 transition-all text-xs font-semibold shadow-sm cursor-pointer"
+            title="Limpieza y Gestión de Imágenes (Duplicados o Purga Total)"
+          >
+            <Images className="h-3.5 w-3.5 text-purple-400" />
+            <span className="hidden sm:inline">Limpieza de Imágenes</span>
           </button>
 
           {/* User Management Button (Solo Admin) */}
@@ -911,6 +924,13 @@ export default function CatalogEngineDashboard() {
       <StockCleanupModal
         isOpen={showStockCleanupModal}
         onClose={() => setShowStockCleanupModal(false)}
+        selectedAccount={selectedAccountObj}
+      />
+
+      {/* Images Cleanup Modal */}
+      <ImagesCleanupModal
+        isOpen={showImagesCleanupModal}
+        onClose={() => setShowImagesCleanupModal(false)}
         selectedAccount={selectedAccountObj}
       />
 
