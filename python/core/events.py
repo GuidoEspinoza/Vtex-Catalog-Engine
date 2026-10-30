@@ -38,8 +38,24 @@ def emit_progress(current: int, total: int, entity_name: str = "", extra: str = 
         "percentage": percentage
     })
 
-def emit_summary(processed: int, created: int, updated: int, errors: int, skipped: int, is_dry_run: bool):
+def emit_summary(
+    processed: int,
+    created: int,
+    updated: int,
+    errors: int,
+    skipped: int,
+    is_dry_run: bool = False,
+    dry_run: Optional[bool] = None,
+    message: Optional[str] = None,
+    **kwargs
+):
     """Emite el resumen final de la corrida."""
+    # Soporte retrocompatible y flexible para is_dry_run o dry_run por posición o kwarg
+    if dry_run is not None:
+        is_dry_run = dry_run
+    elif "dry_run" in kwargs:
+        is_dry_run = kwargs["dry_run"]
+
     mode_str = "Simulación (Dry-Run)" if is_dry_run else "Carga en Producción"
     summary_data = {
         "mode": mode_str,
@@ -50,4 +66,5 @@ def emit_summary(processed: int, created: int, updated: int, errors: int, skippe
         "skipped": skipped,
         "success": errors == 0
     }
-    emit_event("summary", f"Resumen de {mode_str}: {created} creados, {updated} actualizados, {errors} errores, {skipped} omitidos.", summary_data)
+    summary_msg = message or f"Resumen de {mode_str}: {created} creados, {updated} actualizados, {errors} errores, {skipped} omitidos."
+    emit_event("summary", summary_msg, summary_data)

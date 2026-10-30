@@ -9,6 +9,12 @@ from typing import List, Dict, Any, Optional, Set, Tuple
 from core.vtex_client import VtexClient
 from core.events import emit_log, emit_progress, emit_summary
 
+def _safe_id(val: Any) -> int:
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 999999999
+
 def identify_duplicates(files: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Agrupa los archivos por su nombre/clave y separa la copia a conservar
@@ -46,7 +52,7 @@ def identify_duplicates(files: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
         else:
             sorted_group = sorted(
                 group,
-                key=lambda x: (not x.get("IsMain", False), x.get("Id", 999999999)),
+                key=lambda x: (not bool(x.get("IsMain")), _safe_id(x.get("Id"))),
             )
             kept.append(sorted_group[0])
             to_delete.extend(sorted_group[1:])
@@ -286,7 +292,10 @@ def process_images_cleanup(
             emit_log("info", f"... y {remaining} imágenes adicionales marcadas para eliminación.")
 
         deleted_count = total_deletions
-        emit_summary(total_images_found, 0, deleted_count, 0, total_kept_count, dry_run=True)
+        # Actualizar progreso al 100% para reflejar completitud en la interfaz
+        emit_progress(total_deletions, total_deletions, "Diagnóstico finalizado", f"({total_deletions} imágenes marcadas)")
+        summary_msg = f"Resumen de Simulación (Dry-Run): {total_images_found} encontradas, {total_kept_count} únicas conservadas, {deleted_count} marcadas para eliminar."
+        emit_summary(total_images_found, 0, deleted_count, 0, total_kept_count, is_dry_run=True, message=summary_msg)
         emit_log("success", f"Simulación finalizada. {total_deletions} imágenes quedarían eliminadas al ejecutar en producción.")
         return
 
@@ -318,6 +327,9 @@ def process_images_cleanup(
         return "error", desc, "Timeout tras 3 reintentos"
 
     completed_deletions = 0
+    # En lotes grandes, modular la frecuencia de emisión de progreso para no saturar SSE/frontend
+    progress_step = max(1, total_deletions // 100) if total_deletions > 200 else 1
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_del = {executor.submit(delete_image_worker, t): t for t in all_deletion_tasks}
         for future in as_completed(future_to_del):
@@ -325,10 +337,12 @@ def process_images_cleanup(
             status, desc, msg = future.result()
             if status in ["ok", "not_found"]:
                 deleted_count += 1
-                emit_progress(completed_deletions, total_deletions, desc, f"-> {msg}")
+                if completed_deletions % progress_step == 0 or completed_deletions == total_deletions:
+                    emit_progress(completed_deletions, total_deletions, desc, f"-> {msg}")
             else:
                 error_count += 1
                 emit_log("error", f"{desc} -> {msg}")
 
-    emit_summary(total_images_found, 0, deleted_count, error_count, total_kept_count, dry_run=False)
+    summary_msg = f"Resumen de {mode_label}: {total_images_found} encontradas, {total_kept_count} únicas conservadas, {deleted_count} eliminadas, {error_count} errores."
+    emit_summary(total_images_found, 0, deleted_count, error_count, total_kept_count, is_dry_run=False, message=summary_msg)
     emit_log("success", f"Limpieza de imágenes completada ({mode_label}). {deleted_count} eliminadas, {error_count} errores.")

@@ -25,6 +25,12 @@ class VtexClient:
             "X-VTEX-API-AppKey": self.app_key,
             "X-VTEX-API-AppToken": self.app_token,
         }
+
+        # Sesión HTTP persistente con pool de conexiones concurrente
+        self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=0)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         
     def request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """
@@ -42,7 +48,7 @@ class VtexClient:
         
         for attempt in range(max_retries):
             try:
-                res = requests.request(method, url, headers=headers, **kwargs)
+                res = self.session.request(method, url, headers=headers, **kwargs)
                 # VTEX Rate Limiting (HTTP 429)
                 if res.status_code == 429:
                     wait_time = int(res.headers.get("Retry-After", 2))
